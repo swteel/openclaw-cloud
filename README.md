@@ -255,42 +255,67 @@ spring:
 
 ## 管理员操作
 
-### 设置管理员账号
+### 初始化管理员账号
 
-系统没有自动管理员注册入口，需要手动提升：
+首次部署后，需要手动初始化管理员账号（manager 容器内无 python3/sqlite3，需借助 alpine 临时容器操作）：
 
 ```bash
-docker exec openclaw-platform_manager_1 python3 -c "
-import sqlite3
-conn = sqlite3.connect('/data/openclaw.db')
-conn.execute(\"UPDATE users SET role='ADMIN' WHERE username='your_username'\")
-conn.commit()
-print('Done:', conn.execute(\"SELECT username, role FROM users WHERE username='your_username'\").fetchone())
-conn.close()
+# 1. 停止 manager（避免 DB 写冲突）
+docker stop openclaw-platform_manager_1
+
+# 2. 生成密码哈希（以密码 "yourpassword" 为例）
+HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt(10)).decode())")
+
+# 3. 写入数据库
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+cat > /tmp/init.sql << 'SQLEOF'
+INSERT INTO users (username, password_hash, dashscope_key, role, gateway_token, is_deleted, created_at, last_active_at)
+VALUES ('admin', '${HASH}', '', 'ADMIN', 'admin-no-container', 0, datetime('now'), datetime('now'));
+SQLEOF
+sqlite3 /data/openclaw.db < /tmp/init.sql
 "
+
+# 4. 重启 manager
+docker-compose up -d manager
 ```
 
-执行后重新登录，即可访问 `http://<host>:8081/admin/`。
+> **注意**：管理员账号无对应 Docker 容器，只能访问管理台 `/admin/`，不能使用工作台。
+
+### 提升现有用户为管理员
+
+```bash
+docker stop openclaw-platform_manager_1
+
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+sqlite3 /data/openclaw.db \"UPDATE users SET role='ADMIN' WHERE username='your_username';\"
+"
+
+docker-compose up -d manager
+```
 
 ### 查询数据库
 
+manager 容器内没有 python3/sqlite3，需用 alpine 临时容器访问：
+
 ```bash
 # 查看所有用户
-docker exec openclaw-platform_manager_1 python3 -c "
-import sqlite3
-conn = sqlite3.connect('/data/openclaw.db')
-for row in conn.execute('SELECT id, username, role, created_at FROM users'):
-    print(row)
-conn.close()
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+sqlite3 /data/openclaw.db 'SELECT id, username, role, created_at FROM users ORDER BY id'
 "
 
 # 查看所有容器
-docker exec openclaw-platform_manager_1 python3 -c "
-import sqlite3
-conn = sqlite3.connect('/data/openclaw.db')
-for row in conn.execute('SELECT user_id, container_name, status, started_at FROM containers'):
-    print(row)
-conn.close()
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+sqlite3 /data/openclaw.db 'SELECT user_id, container_name, status, host_port FROM containers ORDER BY user_id'
+"
+
+# 查看端口分配
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+sqlite3 /data/openclaw.db 'SELECT user_id, port FROM port_allocations ORDER BY user_id'
 "
 ```
 
@@ -553,3 +578,55 @@ public ResponseEntity<Resource> adminRoot() {
 ```bash
 docker-compose build && docker-compose up -d
 ```
+
+---
+
+### 坑7：SQLite 并发写入导致注册 403（SQLITE_BUSY）
+
+**现象**：用户注册返回 `403 Forbidden from POST http://manager:8080/api/auth/register`。
+Manager 日志报 `SQLITE_BUSY: The database file is locked`。
+
+**根本原因**：Portal 对每个认证请求都发送心跳（更新 `last_active_at`），多个并发心跳
+与注册事务同时写 SQLite，SQLite 默认零等待直接失败，Spring 返回 500，
+WebClient 的异常消息里包含"403"导致误导。
+
+**解决方案**：在 `application.yml` 启用 WAL 模式并设置 busy_timeout：
+```yaml
+spring:
+  datasource:
+    hikari:
+      connection-init-sql: "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;"
+      maximum-pool-size: 1
+```
+- `journal_mode=WAL`：允许读写并发，减少锁竞争
+- `busy_timeout=30000`：等待最多 30 秒而不是立即失败
+- `maximum-pool-size=1`：SQLite 单写者模型，序列化所有 DB 访问
+
+---
+
+### 坑8：DB 与 Docker 状态不一致导致端口冲突
+
+**现象**：注册时报 `Bind for 0.0.0.0:XXXXX failed: port is already allocated`，
+但 `port_allocations` 表里该端口没有记录。
+
+**根本原因**：多次手动干预（直接删容器、`docker cp` 改 DB、重建容器）后，
+DB 中记录的 `host_port` 与实际容器绑定的端口不一致，`port_allocations` 表中
+被删容器的端口记录残留或已清除，但 Docker 仍在占用该端口。
+
+**诊断方法**：对比 DB 中 `containers.host_port` 与 Docker 实际端口：
+```bash
+# 查看Docker实际端口
+docker ps --filter "name=openclaw-user" --format "{{.Names}} {{.Ports}}"
+
+# 查看DB记录的端口
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+sqlite3 /data/openclaw.db 'SELECT user_id, container_name, host_port, status FROM containers ORDER BY user_id'
+"
+```
+
+**修复方法**：停止 manager，用 alpine 容器执行 SQL 对齐 DB 与 Docker 真实状态，
+重建 `port_allocations` 表后重启。
+
+**预防**：不要手动操作 Docker 容器（删除、重建）；如必须操作，重启 manager 后
+让自动同步调度器（每 2 分钟）自动修正 DB 状态。
