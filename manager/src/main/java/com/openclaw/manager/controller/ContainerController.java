@@ -1,5 +1,6 @@
 package com.openclaw.manager.controller;
 
+import com.openclaw.manager.domain.repository.UserRepository;
 import com.openclaw.manager.dto.ApiResponse;
 import com.openclaw.manager.dto.ContainerInfo;
 import com.openclaw.manager.service.ContainerLifecycleService;
@@ -14,14 +15,17 @@ import java.util.Map;
 public class ContainerController {
 
     private final ContainerLifecycleService containerService;
+    private final UserRepository userRepository;
 
-    public ContainerController(ContainerLifecycleService containerService) {
+    public ContainerController(ContainerLifecycleService containerService, UserRepository userRepository) {
         this.containerService = containerService;
+        this.userRepository = userRepository;
     }
 
     @GetMapping("/my")
     public ResponseEntity<ApiResponse<ContainerInfo>> getMyContainer(@AuthenticationPrincipal Long userId) {
         ContainerInfo info = containerService.getContainerInfo(userId);
+        userRepository.findById(userId).ifPresent(u -> info.setGatewayToken(u.getGatewayToken()));
         return ResponseEntity.ok(ApiResponse.ok(info));
     }
 

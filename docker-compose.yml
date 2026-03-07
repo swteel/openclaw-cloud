@@ -3,8 +3,9 @@ version: "3.8"
 services:
   manager:
     image: openclaw-manager:latest
-    ports:
-      - "8080:8080"
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
     volumes:
       - manager-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -22,6 +23,9 @@ services:
 
   portal:
     image: openclaw-portal:latest
+    build:
+      context: ./portal
+      dockerfile: Dockerfile
     ports:
       - "8081:8081"
     depends_on:

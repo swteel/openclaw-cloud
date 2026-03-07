@@ -15,6 +15,7 @@ public class SecurityConfig {
         // Portal uses its own AuthFilter via servlet filter, not Spring Security
         http
             .csrf(csrf -> csrf.disable())
+            .headers(headers -> headers.frameOptions(fo -> fo.disable()))
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
         return http.build();
     }

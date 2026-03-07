@@ -1,8 +1,10 @@
 package com.openclaw.portal.service;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.Map;
 
@@ -88,6 +90,30 @@ public class ManagerClient {
             throw new RuntimeException("No response from manager");
         }
         return response;
+    }
+
+    /**
+     * Proxy an arbitrary HTTP request to manager with user's JWT token.
+     */
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Object> proxyRequest(String method, String path, String token, Object body) {
+        try {
+            WebClient.RequestBodySpec spec = publicClient.method(org.springframework.http.HttpMethod.valueOf(method))
+                    .uri(path)
+                    .header("Authorization", "Bearer " + token);
+            WebClient.ResponseSpec response;
+            if (body != null) {
+                response = spec.bodyValue(body).retrieve();
+            } else {
+                response = spec.retrieve();
+            }
+            Object result = response.bodyToMono(Object.class).block();
+            return ResponseEntity.ok(result);
+        } catch (WebClientResponseException e) {
+            return ResponseEntity.status(e.getStatusCode()).body(e.getResponseBodyAsString());
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("success", false, "message", e.getMessage()));
+        }
     }
 
     /**

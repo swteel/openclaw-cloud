@@ -40,8 +40,13 @@ public class AuthFilter implements Filter {
             return;
         }
 
-        // Only protect /app, /app/** and /portal/upload/**
-        if (!path.equals("/app") && !path.startsWith("/app/") && !path.startsWith("/portal/upload/")) {
+        // Only protect /app, /app/**, /portal/upload/**, /portal/files/**, /api/admin/**, /api/containers/**
+        boolean isProtected = path.equals("/app") || path.startsWith("/app/")
+                || path.startsWith("/portal/upload/")
+                || path.equals("/portal/files") || path.startsWith("/portal/files/")
+                || path.startsWith("/api/admin/") || path.equals("/api/admin")
+                || path.startsWith("/api/containers/") || path.equals("/api/containers");
+        if (!isProtected) {
             chain.doFilter(req, res);
             return;
         }
@@ -58,6 +63,7 @@ public class AuthFilter implements Filter {
 
             request.setAttribute("userId", userId);
             request.setAttribute("username", userInfo.get("username"));
+            request.setAttribute("token", token);
 
             // Send heartbeat asynchronously (best-effort)
             try {

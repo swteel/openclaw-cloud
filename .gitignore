@@ -17,3 +17,7 @@ Thumbs.db
 
 # Docker
 *.log
+
+# Node modules
+node_modules/
+package-lock.json

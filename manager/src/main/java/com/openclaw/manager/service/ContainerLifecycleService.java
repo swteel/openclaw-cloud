@@ -8,11 +8,17 @@ import com.openclaw.manager.domain.entity.Container;
 import com.openclaw.manager.domain.entity.User;
 import com.openclaw.manager.domain.repository.ContainerRepository;
 import com.openclaw.manager.dto.ContainerInfo;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -26,13 +32,16 @@ public class ContainerLifecycleService {
     private final ContainerRepository containerRepo;
     private final PortAllocatorService portAllocator;
     private final PlatformProperties props;
+    private final PlatformConfigService configService;
 
     public ContainerLifecycleService(DockerClient docker, ContainerRepository containerRepo,
-                                     PortAllocatorService portAllocator, PlatformProperties props) {
+                                     PortAllocatorService portAllocator, PlatformProperties props,
+                                     PlatformConfigService configService) {
         this.docker = docker;
         this.containerRepo = containerRepo;
         this.portAllocator = portAllocator;
         this.props = props;
+        this.configService = configService;
     }
 
     @Transactional
@@ -61,10 +70,11 @@ public class ContainerLifecycleService {
                         .withRestartPolicy(RestartPolicy.unlessStoppedRestart()))
                 .withEnv(
                         "OPENCLAW_GATEWAY_TOKEN=" + user.getGatewayToken(),
-                        "DASHSCOPE_API_KEY=" + props.getDashscopeApiKey()
+                        "DASHSCOPE_API_KEY=" + configService.get("dashscope_api_key", props.getDashscopeApiKey())
                 )
                 .exec();
 
+        injectOpenclawConfig(created.getId());
         docker.startContainerCmd(created.getId()).exec();
 
         // Connect to platform network so portal can reach it by container name
@@ -124,6 +134,7 @@ public class ContainerLifecycleService {
 
         if ("STOPPED".equals(container.getStatus())) {
             try {
+                injectOpenclawConfig(container.getContainerId());
                 docker.startContainerCmd(container.getContainerId()).exec();
                 container.setStatus("RUNNING");
                 container.setStartedAt(LocalDateTime.now());
@@ -145,6 +156,7 @@ public class ContainerLifecycleService {
             return toInfo(container);
         }
 
+        injectOpenclawConfig(container.getContainerId());
         docker.startContainerCmd(container.getContainerId()).exec();
         container.setStatus("RUNNING");
         container.setStartedAt(LocalDateTime.now());
@@ -182,6 +194,86 @@ public class ContainerLifecycleService {
 
     public List<ContainerInfo> getAllContainers() {
         return containerRepo.findAll().stream().map(this::toInfo).toList();
+    }
+
+    /**
+     * Copies a custom openclaw config into the container that sets allowedOrigins: ["*"],
+     * overriding the image's default config-template.json.
+     * The gateway token placeholder is preserved for openclaw's own env-var substitution.
+     */
+    private void injectOpenclawConfig(String containerId) {
+        String config = """
+                {
+                  "gateway": {
+                    "mode": "local",
+                    "auth": { "mode": "token", "token": "${OPENCLAW_GATEWAY_TOKEN}" },
+                    "controlUi": { "allowedOrigins": ["*"] },
+                    "trustedProxies": ["172.0.0.0/8", "10.0.0.0/8", "192.168.0.0/16"]
+                  },
+                  "models": {
+                    "providers": {
+                      "qwen-portal": {
+                        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "apiKey": "${DASHSCOPE_API_KEY}",
+                        "api": "openai-completions",
+                        "models": [
+                          {
+                            "id": "coder-model", "name": "Qwen Coder", "reasoning": false,
+                            "input": ["text"],
+                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                            "contextWindow": 128000, "maxTokens": 8192
+                          },
+                          {
+                            "id": "vision-model", "name": "Qwen Vision", "reasoning": false,
+                            "input": ["text", "image"],
+                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                            "contextWindow": 128000, "maxTokens": 8192
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "agents": {
+                    "defaults": {
+                      "model": {
+                        "primary": "qwen-portal/coder-model",
+                        "fallbacks": ["qwen-portal/vision-model"]
+                      },
+                      "models": {
+                        "qwen-portal/coder-model": {"alias": "qwen"},
+                        "qwen-portal/vision-model": {}
+                      },
+                      "compaction": {"mode": "safeguard"},
+                      "maxConcurrent": 4,
+                      "subagents": {"maxConcurrent": 8}
+                    }
+                  },
+                  "tools": { "profile": "full" },
+                  "browser": { "attachOnly": false },
+                  "commands": {
+                    "native": "auto", "nativeSkills": "auto",
+                    "restart": true, "ownerDisplay": "raw"
+                  }
+                }
+                """;
+        try {
+            byte[] configBytes = config.getBytes(StandardCharsets.UTF_8);
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(baos)) {
+                TarArchiveEntry entry = new TarArchiveEntry("config-template.json");
+                entry.setSize(configBytes.length);
+                tar.putArchiveEntry(entry);
+                tar.write(configBytes);
+                tar.closeArchiveEntry();
+            }
+            docker.copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(baos.toByteArray()))
+                    .withRemotePath("/etc/openclaw/")
+                    .exec();
+            log.debug("Injected openclaw config into container {}", containerId);
+        } catch (IOException e) {
+            log.warn("Failed to inject openclaw config into {}: {}", containerId, e.getMessage());
+        }
     }
 
     private ContainerInfo toInfo(Container c) {

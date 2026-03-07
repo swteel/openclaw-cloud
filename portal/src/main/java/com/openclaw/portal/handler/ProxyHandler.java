@@ -85,12 +85,21 @@ public class ProxyHandler {
 
             response.setStatus(upstreamResponse.statusCode());
 
-            // Copy response headers
+            // Copy response headers, stripping iframe-blocking headers
             upstreamResponse.headers().map().forEach((name, values) -> {
                 String nameLower = name.toLowerCase();
-                if (!HOP_BY_HOP_HEADERS.contains(nameLower)) {
-                    values.forEach(v -> response.addHeader(name, v));
+                if (HOP_BY_HOP_HEADERS.contains(nameLower)) return;
+                // Remove X-Frame-Options so the iframe can embed the app
+                if ("x-frame-options".equals(nameLower)) return;
+                if ("content-security-policy".equals(nameLower)) {
+                    // Strip frame-ancestors directive from CSP
+                    values.forEach(v -> {
+                        String stripped = v.replaceAll("(?i)frame-ancestors[^;]*(;|$)", "").trim();
+                        if (!stripped.isEmpty()) response.addHeader(name, stripped);
+                    });
+                    return;
                 }
+                values.forEach(v -> response.addHeader(name, v));
             });
 
             // Stream response body

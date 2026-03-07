@@ -10,6 +10,7 @@ public class ContainerInfo {
     private String browserMode;
     private LocalDateTime createdAt;
     private LocalDateTime startedAt;
+    private String gatewayToken;
 
     public ContainerInfo() {}
 
@@ -44,4 +45,7 @@ public class ContainerInfo {
 
     public LocalDateTime getStartedAt() { return startedAt; }
     public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
+
+    public String getGatewayToken() { return gatewayToken; }
+    public void setGatewayToken(String gatewayToken) { this.gatewayToken = gatewayToken; }
 }
