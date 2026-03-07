@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  manager:
+    image: openclaw-manager:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - manager-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN}
+      - JWT_SECRET=${JWT_SECRET}
+      - MAX_CONTAINERS=${MAX_CONTAINERS:-100}
+      - PORT_RANGE_START=${PORT_RANGE_START:-20000}
+      - PORT_RANGE_END=${PORT_RANGE_END:-25000}
+      - CONTAINER_IMAGE=${CONTAINER_IMAGE:-openclaw-platform:latest}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - PLATFORM_NETWORK=openclaw-platform_default
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    restart: unless-stopped
+
+  portal:
+    image: openclaw-portal:latest
+    ports:
+      - "8081:8081"
+    depends_on:
+      - manager
+    volumes:
+      - workspace-data:/workspace
+    environment:
+      - MANAGER_URL=http://manager:8080
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN}
+      - WORKSPACE_BASE=/workspace
+    restart: unless-stopped
+
+volumes:
+  manager-data:
+  workspace-data:

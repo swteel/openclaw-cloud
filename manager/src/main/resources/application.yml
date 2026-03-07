@@ -1,0 +1,38 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:sqlite:/data/openclaw.db
+    driver-class-name: org.sqlite.JDBC
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+platform:
+  max-containers: ${MAX_CONTAINERS:100}
+  port-range-start: ${PORT_RANGE_START:20000}
+  port-range-end: ${PORT_RANGE_END:25000}
+  internal-token: ${INTERNAL_TOKEN:changeme-internal-token}
+  jwt-secret: ${JWT_SECRET:changeme-jwt-secret-must-be-at-least-32-chars-long}
+  jwt-expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+  container-image: ${CONTAINER_IMAGE:openclaw-platform:latest}
+  docker-host: ${DOCKER_HOST:unix:///var/run/docker.sock}
+  dashscope-api-key: ${DASHSCOPE_API_KEY:}
+  platform-network: ${PLATFORM_NETWORK:openclaw-platform_default}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+logging:
+  level:
+    com.openclaw: INFO
+    org.hibernate.SQL: WARN
