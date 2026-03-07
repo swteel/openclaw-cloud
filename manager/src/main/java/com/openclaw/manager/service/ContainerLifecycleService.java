@@ -61,6 +61,25 @@ public class ContainerLifecycleService {
 
         Volume dataVolume = new Volume("/root/.openclaw");
 
+        // Remove any stale container with the same name (e.g. from a previous failed attempt)
+        try {
+            docker.listContainersCmd().withShowAll(true).withNameFilter(List.of(containerName)).exec()
+                    .stream().filter(c -> {
+                        for (String n : c.getNames()) {
+                            if (n.equals("/" + containerName) || n.equals(containerName)) return true;
+                        }
+                        return false;
+                    })
+                    .forEach(c -> {
+                        log.warn("Removing stale container {} before recreating", containerName);
+                        try { docker.removeContainerCmd(c.getId()).withForce(true).exec(); } catch (Exception ex) {
+                            log.warn("Failed to remove stale container {}: {}", containerName, ex.getMessage());
+                        }
+                    });
+        } catch (Exception e) {
+            log.warn("Stale container check failed: {}", e.getMessage());
+        }
+
         CreateContainerResponse created = docker.createContainerCmd(props.getContainerImage())
                 .withName(containerName)
                 .withExposedPorts(exposedPort)

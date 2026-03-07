@@ -5,6 +5,9 @@ spring:
   datasource:
     url: jdbc:sqlite:/data/openclaw.db
     driver-class-name: org.sqlite.JDBC
+    hikari:
+      connection-init-sql: "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;"
+      maximum-pool-size: 1
   jpa:
     database-platform: org.hibernate.community.dialect.SQLiteDialect
     hibernate:
