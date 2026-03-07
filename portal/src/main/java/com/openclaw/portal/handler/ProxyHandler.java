@@ -42,12 +42,24 @@ public class ProxyHandler {
     }
 
     public void proxy(HttpServletRequest request, HttpServletResponse response) throws IOException {
-        Long userId = (Long) request.getAttribute("userId");
-        String[] containerInfo = managerClient.getContainerInfo(userId);
+        proxyTo(request, response, (Long) request.getAttribute("userId"), "/app");
+    }
+
+    public void proxyTo(HttpServletRequest request, HttpServletResponse response,
+                        Long targetUserId, String pathPrefix) throws IOException {
+        Long userId = targetUserId;
+        String[] containerInfo;
+        try {
+            containerInfo = managerClient.getContainerInfo(userId);
+        } catch (Exception e) {
+            log.warn("No container for user {}: {}", userId, e.getMessage());
+            response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "Container not available");
+            return;
+        }
         String address = containerInfo[0];
         String gatewayToken = containerInfo[1];
 
-        String path = request.getRequestURI().replaceFirst("^/app", "");
+        String path = request.getRequestURI().replaceFirst("^" + pathPrefix, "");
         String query = request.getQueryString();
         String targetUrl = "http://" + address + (path.isEmpty() ? "/" : path)
                 + (query != null ? "?" + query : "");

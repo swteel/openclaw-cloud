@@ -20,6 +20,12 @@ public class AuthFilter implements Filter {
     private static final Logger log = LoggerFactory.getLogger(AuthFilter.class);
     private static final String COOKIE_NAME = "openclaw_token";
 
+    // Sensitive paths in /app that non-admin users cannot access
+    private static final String[] BLOCKED_PATHS = {
+        "/app/config", "/app/settings", "/app/providers",
+        "/app/nodes", "/app/cron", "/app/debug", "/app/usage"
+    };
+
     private final ManagerClient managerClient;
 
     public AuthFilter(ManagerClient managerClient) {
@@ -45,7 +51,8 @@ public class AuthFilter implements Filter {
                 || path.startsWith("/portal/upload/")
                 || path.equals("/portal/files") || path.startsWith("/portal/files/")
                 || path.startsWith("/api/admin/") || path.equals("/api/admin")
-                || path.startsWith("/api/containers/") || path.equals("/api/containers");
+                || path.startsWith("/api/containers/") || path.equals("/api/containers")
+                || path.startsWith("/admin-proxy/");
         if (!isProtected) {
             chain.doFilter(req, res);
             return;
@@ -57,26 +64,41 @@ public class AuthFilter implements Filter {
             return;
         }
 
+        String role;
+        Long userId;
         try {
             Map<String, Object> userInfo = managerClient.verifyToken(token);
-            Long userId = ((Number) userInfo.get("userId")).longValue();
-
-            request.setAttribute("userId", userId);
-            request.setAttribute("username", userInfo.get("username"));
-            request.setAttribute("token", token);
-
-            // Send heartbeat asynchronously (best-effort)
-            try {
-                managerClient.heartbeat(userId);
-            } catch (Exception e) {
-                log.warn("Heartbeat failed for user {}: {}", userId, e.getMessage());
-            }
-
-            chain.doFilter(req, res);
+            userId = ((Number) userInfo.get("userId")).longValue();
+            role = String.valueOf(userInfo.get("role"));
         } catch (Exception e) {
             log.warn("Auth failed for path {}: {}", path, e.getMessage());
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+            return;
         }
+
+        request.setAttribute("userId", userId);
+        request.setAttribute("username", "");
+        request.setAttribute("role", role);
+        request.setAttribute("token", token);
+
+        // Block sensitive paths for non-admin users
+        if (!"ADMIN".equals(role)) {
+            for (String blocked : BLOCKED_PATHS) {
+                if (path.startsWith(blocked)) {
+                    response.sendError(HttpServletResponse.SC_FORBIDDEN, "Access denied");
+                    return;
+                }
+            }
+        }
+
+        // Send heartbeat asynchronously (best-effort)
+        try {
+            managerClient.heartbeat(userId);
+        } catch (Exception e) {
+            log.warn("Heartbeat failed for user {}: {}", userId, e.getMessage());
+        }
+
+        chain.doFilter(req, res);
     }
 
     private String extractToken(HttpServletRequest request) {

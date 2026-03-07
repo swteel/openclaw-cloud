@@ -43,6 +43,9 @@ public class WebSocketConfig implements WebSocketConfigurer {
         registry.addHandler(wsProxyHandler, "/app", "/app/")
                 .addInterceptors(new AuthHandshakeInterceptor(managerClient))
                 .setAllowedOriginPatterns("*");
+        registry.addHandler(wsProxyHandler, "/admin-proxy/**")
+                .addInterceptors(new AdminProxyHandshakeInterceptor(managerClient))
+                .setAllowedOriginPatterns("*");
     }
 
     /**
@@ -65,14 +68,21 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
             @Override
             protected Object getHandlerInternal(HttpServletRequest request) {
-                // Only intercept WebSocket upgrade requests to /app or /app/
                 String uri = request.getRequestURI();
                 String upgrade = request.getHeader("Upgrade");
-                if ("websocket".equalsIgnoreCase(upgrade)
-                        && (uri.equals("/app") || uri.equals("/app/"))) {
-                    return wsRequestHandler;
+                if (!"websocket".equalsIgnoreCase(upgrade)) return null;
+                // User proxy WS
+                if (uri.equals("/app") || uri.equals("/app/")) return wsRequestHandler;
+                // Admin proxy WS: /admin-proxy/{uid}/...
+                if (uri.startsWith("/admin-proxy/")) {
+                    AdminProxyHandshakeInterceptor adminInterceptor =
+                            new AdminProxyHandshakeInterceptor(managerClient);
+                    WebSocketHttpRequestHandler adminWsHandler =
+                            new WebSocketHttpRequestHandler(wsProxyHandler, new DefaultHandshakeHandler());
+                    adminWsHandler.setHandshakeInterceptors(List.of(adminInterceptor));
+                    return adminWsHandler;
                 }
-                return null; // Let other handlers (AppProxyController) handle it
+                return null;
             }
         };
     }
@@ -120,6 +130,63 @@ public class WebSocketConfig implements WebSocketConfigurer {
                 }
             }
             return false;
+        }
+
+        @Override
+        public void afterHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                                   WebSocketHandler wsHandler, Exception exception) {
+        }
+    }
+
+    /**
+     * Handshake interceptor for /admin-proxy/{uid}/** WebSocket connections.
+     * Verifies ADMIN role and extracts the target uid from the URL path.
+     */
+    static class AdminProxyHandshakeInterceptor implements HandshakeInterceptor {
+        private static final String COOKIE_NAME = "openclaw_token";
+        private final ManagerClient managerClient;
+
+        AdminProxyHandshakeInterceptor(ManagerClient managerClient) {
+            this.managerClient = managerClient;
+        }
+
+        @Override
+        public boolean beforeHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                                       WebSocketHandler wsHandler, Map<String, Object> attributes) {
+            if (!(request instanceof ServletServerHttpRequest servletRequest)) return false;
+
+            // Extract token from cookie or header
+            String token = null;
+            Cookie[] cookies = servletRequest.getServletRequest().getCookies();
+            if (cookies != null) {
+                token = Arrays.stream(cookies)
+                        .filter(c -> COOKIE_NAME.equals(c.getName()))
+                        .map(Cookie::getValue).findFirst().orElse(null);
+            }
+            if (token == null) {
+                String auth = servletRequest.getServletRequest().getHeader("Authorization");
+                if (auth != null && auth.startsWith("Bearer ")) token = auth.substring(7);
+            }
+            if (token == null) return false;
+
+            try {
+                Map<String, Object> userInfo = managerClient.verifyToken(token);
+                if (!"ADMIN".equals(userInfo.get("role"))) return false;
+
+                Long userId = ((Number) userInfo.get("userId")).longValue();
+                attributes.put("userId", userId);
+
+                // Extract target uid from path: /admin-proxy/{uid}/...
+                String path = servletRequest.getServletRequest().getRequestURI();
+                String[] parts = path.split("/");
+                if (parts.length >= 3) {
+                    Long targetUserId = Long.parseLong(parts[2]);
+                    attributes.put("targetUserId", targetUserId);
+                }
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
         }
 
         @Override

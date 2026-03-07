@@ -50,11 +50,18 @@ public class WsProxyHandler extends AbstractWebSocketHandler {
             return;
         }
 
-        String[] containerInfo = managerClient.getContainerInfo(userId);
+        // Admin proxy: targetUserId is set when proxying to another user's container
+        Long targetUserId = (Long) clientSession.getAttributes().get("targetUserId");
+        Long effectiveUserId = targetUserId != null ? targetUserId : userId;
+        String pathPrefix = targetUserId != null
+                ? "/admin-proxy/" + targetUserId
+                : "/app";
+
+        String[] containerInfo = managerClient.getContainerInfo(effectiveUserId);
         String address      = containerInfo[0];
         String gatewayToken = containerInfo[1];
 
-        String path  = clientSession.getUri().getPath().replaceFirst("^/app", "");
+        String path  = clientSession.getUri().getPath().replaceFirst("^" + pathPrefix, "");
         String query = clientSession.getUri().getQuery();
         String wsUrl = "ws://" + address + (path.isEmpty() ? "/" : path)
                 + (query != null ? "?" + query : "");

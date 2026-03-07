@@ -58,13 +58,22 @@ export default function ContainerList() {
       render: t => t ? new Date(t).toLocaleString('zh-CN') : '-'
     },
     {
-      title: '操作', key: 'action', width: 160,
+      title: '操作', key: 'action', width: 220,
       render: (_, r) => (
         <Space>
           {r.status === 'RUNNING' && (
-            <Popconfirm title="确认停止?" onConfirm={() => stopContainer(r.userId)}>
-              <Button size="small" danger>停止</Button>
-            </Popconfirm>
+            <>
+              <Button
+                size="small"
+                type="link"
+                onClick={() => window.open(`/admin-proxy/${r.userId}/`, '_blank')}
+              >
+                访问 WebUI
+              </Button>
+              <Popconfirm title="确认停止?" onConfirm={() => stopContainer(r.userId)}>
+                <Button size="small" danger>停止</Button>
+              </Popconfirm>
+            </>
           )}
           <Popconfirm title="确认删除容器?" onConfirm={() => removeContainer(r.userId)}>
             <Button size="small" danger type="primary">删除</Button>
