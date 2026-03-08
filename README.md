@@ -13,6 +13,7 @@
 - [管理员操作](#管理员操作)
 - [页面操作指导](#页面操作指导)
 - [用户使用说明](#用户使用说明)
+- [水平扩展（多主机部署）](#水平扩展多主机部署)
 - [API 参考](#api-参考)
 - [项目结构](#项目结构)
 - [关键踩坑记录](#关键踩坑记录)
@@ -470,6 +471,305 @@ Read HEARTBEAT.md if it exists. If nothing needs attention, reply HEARTBEAT_OK.
 | 访问 | 自动唤醒已停止的容器 |
 | 超过 24h 未活跃 | 容器自动停止（每 5 分钟检查） |
 | 超过 30 天未活跃 | 容器自动删除（保留数据 volume） |
+
+---
+
+## 水平扩展（多主机部署）
+
+### 扩展策略说明
+
+本平台采用 **粘性路由（Sticky Routing）** 方案实现多主机扩展：
+- 每台应用主机独立部署完整的 Portal + Manager + 用户容器，互不共享数据
+- Nginx 统一入口，**按用户 Cookie 哈希**将同一用户的所有请求路由到同一台主机
+- 新用户首次访问时由 Nginx 自动分配主机，此后固定
+- **平台代码零改动**，只需配置 Nginx 和各主机的 `.env`
+
+```
+公共域名（your-domain.com）
+         │
+         ▼
+    Nginx 服务器（独立主机或复用其中一台）
+         │
+         ├─── hash(openclaw_token cookie) ──► Host-A:8081
+         │                                    Portal-A + Manager-A
+         │                                    用户容器群A
+         │
+         └─── hash(openclaw_token cookie) ──► Host-B:8081
+                                              Portal-B + Manager-B
+                                              用户容器群B
+```
+
+> **局限性**：某台应用主机宕机时，该主机上的用户无法自动切换到其他主机，
+> 需要管理员手动迁移数据（见[故障转移](#故障转移)节）。
+> 如需无感知故障转移，需要更复杂的架构改造（共享数据库 + 跨主机容器路由）。
+
+---
+
+### 第一步：部署各应用主机
+
+每台应用主机（Host-A、Host-B……）按照[部署步骤（详细）](#部署步骤详细)完整执行一遍。
+
+**各主机 `.env` 的关键差异**：
+
+```env
+# ✅ 必须相同：所有主机使用同一套密钥，保证跨主机登录状态一致
+JWT_SECRET=同一个随机字符串至少32位
+INTERNAL_TOKEN=同一个随机字符串
+
+# ✅ 必须相同：用户容器镜像名一致
+CONTAINER_IMAGE=openclaw-platform:latest
+
+# ⚙️  各主机按需设置，互不影响
+MAX_CONTAINERS=100
+PORT_RANGE_START=20000
+PORT_RANGE_END=25000
+DASHSCOPE_API_KEY=sk-your-key   # 同一个 API Key 即可
+```
+
+> **重要**：`JWT_SECRET` 必须所有主机相同。
+> Portal 登录时签发的 JWT 带有该密钥签名，Nginx 把用户路由到不同主机时，
+> 目标主机的 Manager 需要能验证这个 JWT。密钥不同会导致跨主机验证失败（401）。
+
+验证每台主机独立可用：
+
+```bash
+# 在每台主机上执行
+curl http://localhost:8081/actuator/health
+# 预期：{"status":"UP"}
+```
+
+---
+
+### 第二步：配置防火墙
+
+**应用主机**（每台 Host-A、Host-B）：
+- 开放 TCP **8081**，来源限制为 **Nginx 主机的 IP**（不要对公网开放，避免绕过 Nginx）
+- 关闭 8080（Manager 内网端口，对任何外部 IP 均不开放）
+- 关闭 20000-25000（用户容器端口，仅 Docker 内网访问）
+
+**Nginx 主机**：
+- 开放 TCP **80** 和 **443**（公网）
+
+```bash
+# 示例：Ubuntu ufw 规则（在每台应用主机上执行，NGINX_IP 替换为 Nginx 主机实际 IP）
+sudo ufw allow from NGINX_IP to any port 8081
+sudo ufw deny 8081        # 拒绝其他来源
+sudo ufw deny 8080
+```
+
+> 云主机还需在控制台的**安全组**中同步配置以上规则。
+
+---
+
+### 第三步：安装并配置 Nginx
+
+在 **Nginx 主机**上执行：
+
+```bash
+sudo apt install -y nginx
+```
+
+创建配置文件 `/etc/nginx/conf.d/openclaw.conf`：
+
+```nginx
+upstream openclaw_backends {
+    # 按 openclaw_token cookie 哈希，同一用户始终路由到同一台主机
+    hash $cookie_openclaw_token consistent;
+
+    server <Host-A的IP>:8081;
+    server <Host-B的IP>:8081;
+    # 继续添加更多主机：
+    # server <Host-C的IP>:8081;
+}
+
+server {
+    listen 80;
+    server_name your-domain.com;   # 替换为你的域名
+
+    # 客户端超时（WebSocket 长连接需要较长时间）
+    proxy_connect_timeout       10s;
+    proxy_send_timeout          3600s;
+    proxy_read_timeout          3600s;
+
+    location / {
+        proxy_pass http://openclaw_backends;
+
+        # 标准代理头
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket 升级支持（工作台 iframe 使用 WebSocket）
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+
+# WebSocket Connection 头处理
+map $http_upgrade $connection_upgrade {
+    default   upgrade;
+    ''        close;
+}
+```
+
+测试并启动：
+
+```bash
+sudo nginx -t          # 检查配置语法
+sudo systemctl reload nginx
+```
+
+访问 `http://your-domain.com` 验证可以正常打开用户门户。
+
+---
+
+### 第四步：配置 HTTPS（推荐）
+
+使用 Certbot 免费证书：
+
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d your-domain.com
+# 按提示输入邮箱，选择自动重定向 HTTP → HTTPS
+sudo systemctl reload nginx
+```
+
+Certbot 会自动修改 nginx 配置，加入 SSL 证书和 HTTPS 监听。证书 90 天自动续期：
+
+```bash
+sudo certbot renew --dry-run   # 验证自动续期可用
+```
+
+---
+
+### 第五步：配置 DNS
+
+在域名注册商（阿里云 DNS、Cloudflare 等）添加 A 记录：
+
+```
+your-domain.com.  A  <Nginx 主机的公网 IP>
+```
+
+> 如果 Nginx 复用了某台应用主机（Host-A），则 DNS 指向 Host-A 的公网 IP 即可。
+> 建议 Nginx 独立部署，避免单点影响整体可用性。
+
+DNS 生效后（通常 1-10 分钟）验证：
+
+```bash
+curl https://your-domain.com/actuator/health
+# 预期：{"status":"UP"}
+```
+
+---
+
+### 第六步：为各主机初始化管理员
+
+每台主机需要单独初始化管理员账号（数据各自独立）：
+
+```bash
+# 在每台主机上执行（参考"管理员操作"章节）
+HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt(10)).decode())")
+docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
+apk add --no-cache sqlite 2>/dev/null | tail -1
+sqlite3 /data/openclaw.db \"INSERT INTO users (username, password_hash, dashscope_key, role, gateway_token, is_deleted, created_at, last_active_at) VALUES ('admin', '${HASH}', '', 'ADMIN', 'admin-no-container', 0, datetime('now'), datetime('now'));\"
+"
+docker compose up -d manager
+```
+
+> 管理台（`/admin/`）登录后只能看到**当前主机**的容器和用户，
+> 各主机管理台相互独立。如需统一监控，需要自行汇总各主机 API 数据。
+
+---
+
+### 验证多主机路由
+
+```bash
+# 用 curl 携带 cookie 模拟同一用户多次请求，确认始终路由到同一台主机
+# （在 Nginx 主机上执行）
+
+# 1. 登录获取 cookie
+curl -c /tmp/test.cookie -X POST https://your-domain.com/portal/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"testuser","password":"testpass"}'
+
+# 2. 多次带 cookie 请求，观察响应来自同一主机（通过日志或响应特征区分）
+for i in $(seq 1 5); do
+  curl -b /tmp/test.cookie -s https://your-domain.com/actuator/health
+  echo ""
+done
+# 预期：5 次请求均由同一台主机响应
+```
+
+---
+
+### 新增主机
+
+扩容时只需：
+
+1. 在新主机上完整执行[部署步骤](#部署步骤详细)（`.env` 使用相同 `JWT_SECRET` 和 `INTERNAL_TOKEN`）
+2. 在 Nginx 配置的 `upstream` 块中增加一行：
+   ```nginx
+   server <新主机IP>:8081;
+   ```
+3. 重载 Nginx：`sudo systemctl reload nginx`
+
+新主机加入后，**新注册的用户**会按哈希分配到各主机（包括新主机）。
+**已有用户**的 cookie 哈希不变，仍路由到原主机，不受影响。
+
+---
+
+### 故障转移
+
+某台主机宕机时，Nginx 的 `consistent hash` 会将该主机的流量转移到其他主机，
+但**用户的数据（账号、容器、聊天历史）留在宕机主机上**，迁移后登录会失败。
+
+**手动数据迁移步骤**（主机恢复后或迁移到新主机）：
+
+```bash
+# 1. 备份宕机主机的数据（在宕机主机上，若能访问）
+docker run --rm -v openclaw-platform_manager-data:/data \
+  -v $(pwd):/backup alpine \
+  tar czf /backup/manager-data-backup.tar.gz /data
+
+# 2. 备份用户工作区文件
+docker run --rm -v openclaw-platform_workspace-data:/workspace \
+  -v $(pwd):/backup alpine \
+  tar czf /backup/workspace-backup.tar.gz /workspace
+
+# 3. 将备份文件传到目标主机
+scp manager-data-backup.tar.gz workspace-backup.tar.gz user@new-host:~/
+
+# 4. 在目标主机上恢复（先停止服务）
+docker compose down
+docker run --rm -v openclaw-platform_manager-data:/data \
+  -v $(pwd):/backup alpine \
+  tar xzf /backup/manager-data-backup.tar.gz -C /
+docker run --rm -v openclaw-platform_workspace-data:/workspace \
+  -v $(pwd):/backup alpine \
+  tar xzf /backup/workspace-backup.tar.gz -C /
+docker compose up -d
+
+# 5. 更新 Nginx 配置，将宕机主机替换为目标主机 IP
+```
+
+> **用户容器数据**（聊天历史、工作区文件）存储在 Docker named volume（`openclaw-data-{userId}-{uuid8}`）中。
+> 这些 volume 在上述步骤中**不会自动备份**，需要额外处理（见下方完整备份方案）。
+
+**完整容器数据备份**（在宕机主机上执行）：
+
+```bash
+# 列出所有用户容器的 volume
+docker volume ls | grep openclaw-data
+
+# 批量备份所有 volume
+for vol in $(docker volume ls --format '{{.Name}}' | grep openclaw-data); do
+  docker run --rm -v ${vol}:/data -v $(pwd)/vol-backup:/backup alpine \
+    tar czf /backup/${vol}.tar.gz /data
+  echo "Backed up: ${vol}"
+done
+```
 
 ---
 
