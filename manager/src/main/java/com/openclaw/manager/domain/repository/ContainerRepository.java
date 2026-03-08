@@ -12,6 +12,12 @@ import java.util.Optional;
 public interface ContainerRepository extends JpaRepository<Container, Long> {
     Optional<Container> findByUserId(Long userId);
 
+    Optional<Container> findFirstByUserId(Long userId);
+
+    List<Container> findAllByUserId(Long userId);
+
+    Optional<Container> findByContainerName(String containerName);
+
     @Query("SELECT c FROM Container c JOIN User u ON c.userId = u.id " +
            "WHERE c.status = 'RUNNING' AND u.lastActiveAt < :threshold AND u.isDeleted = 0")
     List<Container> findRunningInactiveContainers(@Param("threshold") LocalDateTime threshold);

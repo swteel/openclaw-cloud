@@ -3,6 +3,7 @@ package com.openclaw.manager.dto;
 import java.time.LocalDateTime;
 
 public class ContainerInfo {
+    private Long id;
     private Long userId;
     private String containerName;
     private int hostPort;
@@ -14,8 +15,9 @@ public class ContainerInfo {
 
     public ContainerInfo() {}
 
-    public ContainerInfo(Long userId, String containerName, int hostPort, String status,
+    public ContainerInfo(Long id, Long userId, String containerName, int hostPort, String status,
                          String browserMode, LocalDateTime createdAt, LocalDateTime startedAt) {
+        this.id = id;
         this.userId = userId;
         this.containerName = containerName;
         this.hostPort = hostPort;
@@ -24,6 +26,9 @@ public class ContainerInfo {
         this.createdAt = createdAt;
         this.startedAt = startedAt;
     }
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
 
     public Long getUserId() { return userId; }
     public void setUserId(Long userId) { this.userId = userId; }

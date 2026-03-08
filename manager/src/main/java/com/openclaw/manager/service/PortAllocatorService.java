@@ -43,4 +43,9 @@ public class PortAllocatorService {
     public void release(Long userId) {
         repo.deleteByUserId(userId);
     }
+
+    @Transactional
+    public void releasePort(int port) {
+        repo.deleteByPort(port);
+    }
 }

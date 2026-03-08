@@ -63,6 +63,25 @@ public class ManagerClient {
     }
 
     /**
+     * Get container address and gateway token by container name.
+     * Returns [address, gatewayToken].
+     */
+    @SuppressWarnings("unchecked")
+    public String[] getContainerInfoByName(String containerName) {
+        Map<String, Object> response = internalClient.get()
+                .uri("/internal/containers/by-name/{name}/address", containerName)
+                .retrieve()
+                .bodyToMono(Map.class)
+                .block();
+
+        if (response == null || !Boolean.TRUE.equals(response.get("success"))) {
+            throw new RuntimeException("Failed to get container info for name " + containerName);
+        }
+        Map<String, String> data = (Map<String, String>) response.get("data");
+        return new String[]{data.get("address"), data.get("gatewayToken")};
+    }
+
+    /**
      * Send heartbeat and wake container if needed.
      */
     @SuppressWarnings("unchecked")

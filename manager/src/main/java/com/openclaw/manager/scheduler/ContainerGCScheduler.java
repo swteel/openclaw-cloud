@@ -48,7 +48,7 @@ public class ContainerGCScheduler {
 
     private void doSync() {
         List<Container> active = containerRepo.findAll().stream()
-                .filter(c -> "RUNNING".equals(c.getStatus()) || "STOPPED".equals(c.getStatus()))
+                .filter(c -> "RUNNING".equals(c.getStatus()) || "STOPPED".equals(c.getStatus()) || "REMOVING".equals(c.getStatus()))
                 .toList();
 
         log.info("Docker state sync: checking {} active containers", active.size());
@@ -62,11 +62,10 @@ public class ContainerGCScheduler {
                         .toArray(new com.github.dockerjava.api.model.Container[0]);
 
                 if (found.length == 0) {
-                    // Container gone from Docker entirely
-                    log.warn("Container {} not found in Docker, marking REMOVED", c.getContainerName());
-                    portAllocator.release(c.getUserId());
-                    c.setStatus("REMOVED");
-                    containerRepo.save(c);
+                    // Container gone from Docker entirely - delete the DB record
+                    log.warn("Container {} not found in Docker, deleting record", c.getContainerName());
+                    portAllocator.releasePort(c.getHostPort());
+                    containerRepo.delete(c);
                     synced++;
                 } else {
                     String dockerStatus = found[0].getState(); // "running", "exited", "paused", etc.

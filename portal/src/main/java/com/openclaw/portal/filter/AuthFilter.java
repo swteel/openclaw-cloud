@@ -46,8 +46,9 @@ public class AuthFilter implements Filter {
             return;
         }
 
-        // Only protect /app, /app/**, /portal/upload/**, /portal/files/**, /api/admin/**, /api/containers/**
+        // Only protect /app, /app/**, /app-c/**, /portal/upload/**, /portal/files/**, /api/admin/**, /api/containers/**
         boolean isProtected = path.equals("/app") || path.startsWith("/app/")
+                || path.startsWith("/app-c/")
                 || path.startsWith("/portal/upload/")
                 || path.equals("/portal/files") || path.startsWith("/portal/files/")
                 || path.startsWith("/api/admin/") || path.equals("/api/admin")

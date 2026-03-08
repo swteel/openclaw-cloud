@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -24,9 +25,21 @@ public class ContainerController {
 
     @GetMapping("/my")
     public ResponseEntity<ApiResponse<ContainerInfo>> getMyContainer(@AuthenticationPrincipal Long userId) {
-        ContainerInfo info = containerService.getContainerInfo(userId);
-        userRepository.findById(userId).ifPresent(u -> info.setGatewayToken(u.getGatewayToken()));
-        return ResponseEntity.ok(ApiResponse.ok(info));
+        try {
+            ContainerInfo info = containerService.getContainerInfo(userId);
+            userRepository.findById(userId).ifPresent(u -> info.setGatewayToken(u.getGatewayToken()));
+            return ResponseEntity.ok(ApiResponse.ok(info));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.ok(ApiResponse.ok(null));
+        }
+    }
+
+    @GetMapping("/my/all")
+    public ResponseEntity<ApiResponse<List<ContainerInfo>>> getMyContainers(@AuthenticationPrincipal Long userId) {
+        List<ContainerInfo> infos = containerService.getAllContainersForUser(userId);
+        String gatewayToken = userRepository.findById(userId).map(u -> u.getGatewayToken()).orElse(null);
+        infos.forEach(info -> info.setGatewayToken(gatewayToken));
+        return ResponseEntity.ok(ApiResponse.ok(infos));
     }
 
     @PostMapping("/my/start")

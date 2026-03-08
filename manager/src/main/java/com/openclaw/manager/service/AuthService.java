@@ -16,14 +16,12 @@ public class AuthService {
     private final UserRepository userRepo;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenProvider jwtProvider;
-    private final ContainerLifecycleService containerService;
 
     public AuthService(UserRepository userRepo, PasswordEncoder passwordEncoder,
-                       JwtTokenProvider jwtProvider, ContainerLifecycleService containerService) {
+                       JwtTokenProvider jwtProvider) {
         this.userRepo = userRepo;
         this.passwordEncoder = passwordEncoder;
         this.jwtProvider = jwtProvider;
-        this.containerService = containerService;
     }
 
     @Transactional
@@ -40,7 +38,6 @@ public class AuthService {
         user.setRole("USER");
         user = userRepo.save(user);
 
-        containerService.createAndStart(user);
         return user;
     }
 

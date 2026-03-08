@@ -46,6 +46,73 @@ public class ProxyHandler {
         proxyTo(request, response, (Long) request.getAttribute("userId"), "/app");
     }
 
+    public void proxyToByAddress(HttpServletRequest request, HttpServletResponse response,
+                                  String address, String gatewayToken, String pathPrefix) throws IOException {
+        String path = request.getRequestURI().replaceFirst("^" + pathPrefix, "");
+        String query = request.getQueryString();
+        String targetUrl = "http://" + address + (path.isEmpty() ? "/" : path)
+                + (query != null ? "?" + query : "");
+
+        log.debug("Proxying {} {} -> {}", request.getMethod(), request.getRequestURI(), targetUrl);
+
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(targetUrl))
+                .timeout(Duration.ofSeconds(30));
+
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String name = headerNames.nextElement().toLowerCase();
+            if (!HOP_BY_HOP_HEADERS.contains(name) && !"authorization".equals(name)) {
+                builder.header(name, request.getHeader(name));
+            }
+        }
+        if (gatewayToken != null && !gatewayToken.isBlank()) {
+            builder.header("Authorization", "Bearer " + gatewayToken);
+        }
+        String method = request.getMethod();
+        if ("GET".equals(method) || "DELETE".equals(method) || "HEAD".equals(method)) {
+            builder.method(method, HttpRequest.BodyPublishers.noBody());
+        } else {
+            byte[] body = request.getInputStream().readAllBytes();
+            builder.method(method, HttpRequest.BodyPublishers.ofByteArray(body));
+        }
+
+        try {
+            HttpResponse<InputStream> upstreamResponse = httpClient.send(
+                    builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+
+            response.setStatus(upstreamResponse.statusCode());
+
+            upstreamResponse.headers().map().forEach((name, values) -> {
+                String nameLower = name.toLowerCase();
+                if (HOP_BY_HOP_HEADERS.contains(nameLower)) return;
+                if ("x-frame-options".equals(nameLower)) return;
+                if ("content-security-policy".equals(nameLower)) return;
+                values.forEach(v -> response.addHeader(name, v));
+            });
+
+            try (InputStream body = upstreamResponse.body()) {
+                String ct = upstreamResponse.headers().firstValue("content-type").orElse("");
+                if (ct.startsWith("text/html")) {
+                    byte[] bytes = body.readAllBytes();
+                    String html = new String(bytes, StandardCharsets.UTF_8);
+                    html = injectHideScript(html);
+                    byte[] out = html.getBytes(StandardCharsets.UTF_8);
+                    response.setContentLength(out.length);
+                    response.getOutputStream().write(out);
+                } else {
+                    body.transferTo(response.getOutputStream());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            response.sendError(HttpServletResponse.SC_BAD_GATEWAY, "Proxy interrupted");
+        } catch (Exception e) {
+            log.error("Proxy error -> {}: {}", targetUrl, e.toString(), e);
+            response.sendError(HttpServletResponse.SC_BAD_GATEWAY, "Proxy error: " + e);
+        }
+    }
+
     public void proxyTo(HttpServletRequest request, HttpServletResponse response,
                         Long targetUserId, String pathPrefix) throws IOException {
         Long userId = targetUserId;
@@ -121,6 +188,10 @@ public class ProxyHandler {
                     if ("/app".equals(pathPrefix)) {
                         html = injectHideScript(html);
                     }
+                    // Clear localStorage for admin-proxy to prevent cross-container cache pollution
+                    if (pathPrefix.startsWith("/admin-proxy/")) {
+                        html = injectClearStorageScript(html);
+                    }
                     byte[] out = html.getBytes(StandardCharsets.UTF_8);
                     response.setContentLength(out.length);
                     response.getOutputStream().write(out);
@@ -135,6 +206,24 @@ public class ProxyHandler {
             log.error("Proxy error for user {} -> {}: {}", userId, targetUrl, e.toString(), e);
             response.sendError(HttpServletResponse.SC_BAD_GATEWAY, "Proxy error: " + e);
         }
+    }
+
+    /**
+     * Injects a script that clears localStorage/sessionStorage before the app loads,
+     * preventing stale cache from a previously viewed container from showing up.
+     */
+    private static String injectClearStorageScript(String html) {
+        String script = """
+            <script data-portal-clear="1">
+            (function(){
+              try { localStorage.clear(); sessionStorage.clear(); } catch(_) {}
+            })();
+            </script>
+            """;
+        if (html.contains("<head>")) {
+            return html.replace("<head>", "<head>" + script);
+        }
+        return script + html;
     }
 
     /**

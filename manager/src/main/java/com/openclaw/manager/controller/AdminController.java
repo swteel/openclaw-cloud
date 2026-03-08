@@ -39,13 +39,40 @@ public class AdminController {
     }
 
     @GetMapping("/containers")
-    public ResponseEntity<ApiResponse<List<ContainerInfo>>> listContainers() {
-        return ResponseEntity.ok(ApiResponse.ok(containerService.getAllContainers()));
+    public ResponseEntity<ApiResponse<List<Map<String, Object>>>> listContainers() {
+        List<Map<String, Object>> result = containerService.getAllContainers().stream().map(c -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", c.getId());
+            m.put("userId", c.getUserId());
+            m.put("username", userRepo.findById(c.getUserId()).map(u -> u.getUsername()).orElse("-"));
+            m.put("containerName", c.getContainerName());
+            m.put("hostPort", c.getHostPort());
+            m.put("status", c.getStatus());
+            m.put("browserMode", c.getBrowserMode());
+            m.put("createdAt", c.getCreatedAt());
+            m.put("startedAt", c.getStartedAt());
+            return m;
+        }).collect(Collectors.toList());
+        return ResponseEntity.ok(ApiResponse.ok(result));
+    }
+
+    @PostMapping("/containers/{uid}/create")
+    public ResponseEntity<ApiResponse<ContainerInfo>> createContainer(@PathVariable("uid") Long uid) {
+        User user = userRepo.findById(uid)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + uid));
+        ContainerInfo info = containerService.createAndStart(user);
+        return ResponseEntity.ok(ApiResponse.ok(info));
+    }
+
+    @PostMapping("/containers/{uid}/start")
+    public ResponseEntity<ApiResponse<ContainerInfo>> startContainer(@PathVariable("uid") Long uid) {
+        ContainerInfo info = containerService.startContainer(uid);
+        return ResponseEntity.ok(ApiResponse.ok(info));
     }
 
     @PostMapping("/containers/{uid}/stop")
     public ResponseEntity<ApiResponse<Void>> stopContainer(@PathVariable("uid") Long uid) {
-        Container container = containerRepo.findByUserId(uid)
+        Container container = containerRepo.findFirstByUserId(uid)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + uid));
         containerService.stopContainer(container);
         return ResponseEntity.ok(ApiResponse.ok(null));
@@ -53,8 +80,32 @@ public class AdminController {
 
     @PostMapping("/containers/{uid}/remove")
     public ResponseEntity<ApiResponse<Void>> removeContainer(@PathVariable("uid") Long uid) {
-        Container container = containerRepo.findByUserId(uid)
+        Container container = containerRepo.findFirstByUserId(uid)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + uid));
+        containerService.removeContainerKeepVolume(container);
+        return ResponseEntity.ok(ApiResponse.ok(null));
+    }
+
+    @PostMapping("/containers/id/{cid}/stop")
+    public ResponseEntity<ApiResponse<Void>> stopContainerById(@PathVariable("cid") Long cid) {
+        Container container = containerRepo.findById(cid)
+                .orElseThrow(() -> new IllegalArgumentException("No container with id " + cid));
+        containerService.stopContainer(container);
+        return ResponseEntity.ok(ApiResponse.ok(null));
+    }
+
+    @PostMapping("/containers/id/{cid}/start")
+    public ResponseEntity<ApiResponse<Void>> startContainerById(@PathVariable("cid") Long cid) {
+        Container container = containerRepo.findById(cid)
+                .orElseThrow(() -> new IllegalArgumentException("No container with id " + cid));
+        containerService.startContainerEntity(container);
+        return ResponseEntity.ok(ApiResponse.ok(null));
+    }
+
+    @PostMapping("/containers/id/{cid}/remove")
+    public ResponseEntity<ApiResponse<Void>> removeContainerById(@PathVariable("cid") Long cid) {
+        Container container = containerRepo.findById(cid)
+                .orElseThrow(() -> new IllegalArgumentException("No container with id " + cid));
         containerService.removeContainerKeepVolume(container);
         return ResponseEntity.ok(ApiResponse.ok(null));
     }
@@ -81,7 +132,9 @@ public class AdminController {
             m.put("role", u.getRole());
             m.put("createdAt", u.getCreatedAt());
             m.put("lastActiveAt", u.getLastActiveAt());
-            containerRepo.findByUserId(u.getId()).ifPresent(c -> m.put("containerStatus", c.getStatus()));
+            List<String> names = containerRepo.findAllByUserId(u.getId())
+                    .stream().map(Container::getContainerName).collect(Collectors.toList());
+            m.put("containerNames", names);
             return m;
         }).collect(Collectors.toList());
         return ResponseEntity.ok(ApiResponse.ok(result));

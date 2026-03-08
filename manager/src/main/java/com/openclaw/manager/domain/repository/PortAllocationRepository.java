@@ -11,4 +11,6 @@ public interface PortAllocationRepository extends JpaRepository<PortAllocation, 
     List<Integer> findAllAllocatedPorts();
 
     void deleteByUserId(Long userId);
+
+    void deleteByPort(int port);
 }

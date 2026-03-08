@@ -45,6 +45,14 @@ public class InternalController {
         return ResponseEntity.ok(ApiResponse.ok(Map.of("address", address, "gatewayToken", gatewayToken)));
     }
 
+    @GetMapping("/containers/by-name/{name}/address")
+    public ResponseEntity<ApiResponse<Map<String, String>>> getContainerAddressByName(@PathVariable("name") String name) {
+        String address = containerService.getContainerAddressByName(name);
+        Long userId = containerService.getUserIdByContainerName(name);
+        String gatewayToken = authService.getGatewayToken(userId);
+        return ResponseEntity.ok(ApiResponse.ok(Map.of("address", address, "gatewayToken", gatewayToken)));
+    }
+
     @PostMapping("/users/{uid}/heartbeat")
     public ResponseEntity<ApiResponse<Void>> heartbeat(@PathVariable("uid") Long uid) {
         activityService.recordHeartbeat(uid);

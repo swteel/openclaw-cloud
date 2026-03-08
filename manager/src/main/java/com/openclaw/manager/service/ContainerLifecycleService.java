@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 public class ContainerLifecycleService {
@@ -52,8 +53,9 @@ public class ContainerLifecycleService {
         }
 
         int hostPort = portAllocator.allocate(user.getId());
-        String containerName = "openclaw-user-" + user.getId();
-        String volumeName = "openclaw-data-" + user.getId();
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String containerName = "openclaw-" + user.getId() + "-" + suffix;
+        String volumeName = "openclaw-data-" + user.getId() + "-" + suffix;
 
         ExposedPort exposedPort = ExposedPort.tcp(OPENCLAW_PORT);
         Ports portBindings = new Ports();
@@ -140,15 +142,14 @@ public class ContainerLifecycleService {
         } catch (Exception e) {
             log.warn("Error removing container {}: {}", container.getContainerId(), e.getMessage());
         }
-        portAllocator.release(container.getUserId());
-        container.setStatus("REMOVING");
-        containerRepo.save(container);
+        portAllocator.releasePort(container.getHostPort());
+        containerRepo.delete(container);
         log.info("Removed container {} for user {}", container.getContainerName(), container.getUserId());
     }
 
     @Transactional
     public void wakeIfNeeded(Long userId) {
-        Container container = containerRepo.findByUserId(userId)
+        Container container = containerRepo.findFirstByUserId(userId)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
 
         if ("STOPPED".equals(container.getStatus())) {
@@ -168,9 +169,13 @@ public class ContainerLifecycleService {
 
     @Transactional
     public ContainerInfo startContainer(Long userId) {
-        Container container = containerRepo.findByUserId(userId)
+        Container container = containerRepo.findFirstByUserId(userId)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
+        return startContainerEntity(container);
+    }
 
+    @Transactional
+    public ContainerInfo startContainerEntity(Container container) {
         if (!"STOPPED".equals(container.getStatus())) {
             return toInfo(container);
         }
@@ -184,21 +189,33 @@ public class ContainerLifecycleService {
     }
 
     public ContainerInfo getContainerInfo(Long userId) {
-        Container container = containerRepo.findByUserId(userId)
+        Container container = containerRepo.findFirstByUserId(userId)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
         return toInfo(container);
     }
 
     public String getContainerAddress(Long userId) {
-        Container container = containerRepo.findByUserId(userId)
+        Container container = containerRepo.findFirstByUserId(userId)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
         // Use container name on shared network so portal can reach it directly
         return container.getContainerName() + ":" + OPENCLAW_PORT;
     }
 
+    public String getContainerAddressByName(String containerName) {
+        Container container = containerRepo.findByContainerName(containerName)
+                .orElseThrow(() -> new IllegalArgumentException("No container with name " + containerName));
+        return container.getContainerName() + ":" + OPENCLAW_PORT;
+    }
+
+    public Long getUserIdByContainerName(String containerName) {
+        Container container = containerRepo.findByContainerName(containerName)
+                .orElseThrow(() -> new IllegalArgumentException("No container with name " + containerName));
+        return container.getUserId();
+    }
+
     @Transactional
     public ContainerInfo updateBrowserMode(Long userId, String mode) {
-        Container container = containerRepo.findByUserId(userId)
+        Container container = containerRepo.findFirstByUserId(userId)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
         container.setBrowserMode(mode);
         containerRepo.save(container);
@@ -206,13 +223,17 @@ public class ContainerLifecycleService {
     }
 
     public String getWindowsNodeConnectionCmd(Long userId) {
-        Container container = containerRepo.findByUserId(userId)
+        Container container = containerRepo.findFirstByUserId(userId)
                 .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
         return "openclaw browser-node --server ws://HOST:" + container.getHostPort();
     }
 
     public List<ContainerInfo> getAllContainers() {
         return containerRepo.findAll().stream().map(this::toInfo).toList();
+    }
+
+    public List<ContainerInfo> getAllContainersForUser(Long userId) {
+        return containerRepo.findAllByUserId(userId).stream().map(this::toInfo).toList();
     }
 
     /**
@@ -297,7 +318,7 @@ public class ContainerLifecycleService {
 
     private ContainerInfo toInfo(Container c) {
         return new ContainerInfo(
-                c.getUserId(), c.getContainerName(), c.getHostPort(),
+                c.getId(), c.getUserId(), c.getContainerName(), c.getHostPort(),
                 c.getStatus(), c.getBrowserMode(), c.getCreatedAt(), c.getStartedAt()
         );
     }

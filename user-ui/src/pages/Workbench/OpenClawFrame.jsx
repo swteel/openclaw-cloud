@@ -1,21 +1,41 @@
 import React, { useRef, useState, useEffect } from 'react'
 import { Spin } from 'antd'
+import { useLocation } from 'react-router-dom'
 
 const BLOCKED_ROUTES = /\/(config|settings|providers|nodes|cron|debug|usage)(\/|$|\?)/
 
 export default function OpenClawFrame() {
   const iframeRef = useRef(null)
   const [iframeSrc, setIframeSrc] = useState(null)
+  const location = useLocation()
+  const containerName = location.state?.containerName
 
   useEffect(() => {
-    fetch('/api/containers/my', { credentials: 'include' })
-      .then(r => r.json())
-      .then(data => {
-        const token = data?.data?.gatewayToken
-        setIframeSrc(token ? `/app/chat?token=${encodeURIComponent(token)}` : '/app/chat')
-      })
-      .catch(() => setIframeSrc('/app/chat'))
-  }, [])
+    if (containerName) {
+      // Use container-specific proxy path; fetch gateway token from /my/all
+      fetch('/api/containers/my/all', { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+          const containers = data?.data || []
+          const matched = containers.find(c => c.containerName === containerName)
+          const token = matched?.gatewayToken
+          const src = token
+            ? `/app-c/${containerName}/chat?token=${encodeURIComponent(token)}`
+            : `/app-c/${containerName}/chat`
+          setIframeSrc(src)
+        })
+        .catch(() => setIframeSrc(`/app-c/${containerName}/chat`))
+    } else {
+      // Fallback: use legacy /app route (first container)
+      fetch('/api/containers/my', { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+          const token = data?.data?.gatewayToken
+          setIframeSrc(token ? `/app/chat?token=${encodeURIComponent(token)}` : '/app/chat')
+        })
+        .catch(() => setIframeSrc('/app/chat'))
+    }
+  }, [containerName])
 
   const onLoad = () => {
     try {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Table, Tag, Select, message } from 'antd'
+import { Table, Tag, Select, Button, message } from 'antd'
 import api from '../api'
 
 export default function UserList() {
@@ -19,6 +19,16 @@ export default function UserList() {
   }
 
   useEffect(() => { fetchUsers() }, [])
+
+  const createContainer = async (uid) => {
+    try {
+      await api.post(`/api/admin/containers/${uid}/create`)
+      message.success('操作成功')
+      fetchUsers()
+    } catch {
+      message.error('操作失败')
+    }
+  }
 
   const changeRole = async (uid, role) => {
     try {
@@ -49,8 +59,11 @@ export default function UserList() {
       )
     },
     {
-      title: '容器状态', dataIndex: 'containerStatus', key: 'containerStatus',
-      render: s => s ? <Tag color={s === 'RUNNING' ? 'green' : 'orange'}>{s}</Tag> : <Tag>无容器</Tag>
+      title: '拥有容器', dataIndex: 'containerNames', key: 'containerNames',
+      render: names => {
+        if (!names || names.length === 0) return <Tag>—</Tag>
+        return <span>{names.join(', ')}</span>
+      }
     },
     {
       title: '注册时间', dataIndex: 'createdAt', key: 'createdAt',
@@ -59,6 +72,16 @@ export default function UserList() {
     {
       title: '最后活跃', dataIndex: 'lastActiveAt', key: 'lastActiveAt',
       render: t => t ? new Date(t).toLocaleString('zh-CN') : '-'
+    },
+    {
+      title: '操作', key: 'actions',
+      render: (_, r) => {
+        const names = r.containerNames || []
+        if (names.length === 0) {
+          return <Button size="small" type="primary" onClick={() => createContainer(r.id)}>创建容器</Button>
+        }
+        return null
+      }
     },
   ]
 

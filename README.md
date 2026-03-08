@@ -11,6 +11,7 @@
 - [部署步骤（详细）](#部署步骤详细)
 - [配置说明](#配置说明)
 - [管理员操作](#管理员操作)
+- [页面操作指导](#页面操作指导)
 - [用户使用说明](#用户使用说明)
 - [API 参考](#api-参考)
 - [项目结构](#项目结构)
@@ -26,20 +27,23 @@ Browser
   ▼
 Portal (port 8081) ─── 对外唯一入口
   │
-  ├── GET  /              → user-ui (React SPA，用户门户)
-  ├── GET  /admin/        → admin-ui (React SPA，管理台)
-  ├── ANY  /app/**        → HTTP 反向代理到用户专属 openclaw 容器
-  ├── WS   /app/**        → WebSocket 代理到用户专属 openclaw 容器
-  ├── POST /portal/login  → 登录，写 Cookie
-  ├── POST /api/register  → 注册（转发到 Manager）
-  └── ANY  /api/**        → 代理到 Manager（携带 JWT）
+  ├── GET  /                        → user-ui (React SPA，用户门户)
+  ├── GET  /admin/                  → admin-ui (React SPA，管理台)
+  ├── ANY  /app/**                  → HTTP 代理到用户第一个 openclaw 容器
+  ├── ANY  /app-c/{containerName}/** → HTTP 代理到指定名称的 openclaw 容器
+  ├── ANY  /admin-proxy/{uid}/**    → 管理员专用代理，到指定用户第一个容器
+  ├── WS   /app/**                  → WebSocket 代理到用户专属 openclaw 容器
+  ├── POST /portal/login            → 登录，写 Cookie
+  ├── POST /api/register            → 注册（转发到 Manager）
+  └── ANY  /api/**                  → 代理到 Manager（携带 JWT）
         │
         ▼
 Manager (port 8080，仅内网)
   │   用户管理、JWT 签发、容器生命周期
   │
   └── Docker Daemon
-        └── openclaw-user-{id}  (port 20000+，每用户一个容器)
+        ├── openclaw-{userId}-{uuid8}  容器1（每用户可有多个）
+        └── openclaw-{userId}-{uuid8}  容器2
 ```
 
 ### 服务说明
@@ -321,6 +325,78 @@ sqlite3 /data/openclaw.db 'SELECT user_id, port FROM port_allocations ORDER BY u
 
 ---
 
+---
+
+## 页面操作指导
+
+### 管理台 — 容器列表（`/admin/containers`）
+
+| 操作 | 说明 |
+|------|------|
+| **统计卡片** | 顶部显示总数、运行中、已停止数量，实时反映当前状态 |
+| **创建容器** | 点击页面顶部"创建容器"按钮，弹框选择目标用户，确认后为其新建一个独立容器实例；同一用户可创建多个容器 |
+| **访问 WebUI** | 在运行中的容器行点击，在新标签页打开该容器的 OpenClaw 界面（自动携带 gateway token，无需手动粘贴） |
+| **停止** | 停止运行中的容器（保留数据），操作按容器 DB ID 执行，不影响同用户其他容器 |
+| **删除** | 强制停止并删除容器记录及端口分配（保留数据 volume），同样按容器 ID 独立操作 |
+
+> **注意**：停止/删除操作通过 `/api/admin/containers/id/{cid}/stop|remove` 按容器 ID 操作，不再通过 userId，避免影响同用户其他容器。
+
+---
+
+### 管理台 — 用户列表（`/admin/users`）
+
+| 操作 | 说明 |
+|------|------|
+| **拥有容器列** | 显示该用户所有容器名称（逗号分隔），无容器显示"—" |
+| **角色下拉** | 直接切换 USER / ADMIN，立即生效 |
+| **创建容器**（无容器时显示） | 为该用户创建第一个容器，跳转到容器列表可查看 |
+| 容器的停止/删除 | 已移至**容器列表页**按容器粒度操作，用户列表不再提供 |
+
+---
+
+### 管理台 — 访问用户 WebUI 说明
+
+点击容器列表中的"访问 WebUI"后：
+1. 浏览器打开 `/admin-proxy/{uid}/`
+2. Portal 自动重定向到 `/admin-proxy/{uid}/chat?token={gatewayToken}`（服务端注入 token）
+3. 页面加载时清除浏览器 localStorage（防止跨容器历史污染）
+4. OpenClaw 从 URL 读取 token 完成认证，显示该用户**真实的**服务端历史
+
+> **注意**：静态资源（`.js`、`.css`）和 XHR/API 调用不会触发重定向，只有浏览器页面导航（`Accept: text/html`）才会。
+
+---
+
+### 用户端 — Dashboard（`/`）
+
+| 操作 | 说明 |
+|------|------|
+| **实例列表** | 展示当前用户所有容器，每条显示容器名、状态 Tag、启动时间 |
+| **启动** | 容器 STOPPED 时显示，点击后唤醒容器（约 2 秒后刷新状态） |
+| **进入工作台** | 容器 RUNNING 时显示，携带 `containerName` 跳转到工作台 |
+| **刷新** | 手动重新拉取状态 |
+| 无容器 | 显示"暂无容器，请联系管理员" |
+
+---
+
+### 用户端 — 工作台（`/workbench`）
+
+- 从 Dashboard 点击"进入工作台"时，会将 `containerName` 通过路由状态传递
+- 工作台 iframe 加载 `/app-c/{containerName}/chat?token={gatewayToken}`，每个容器路由独立
+- 若未携带 `containerName`（直接访问 `/workbench`），回退到 `/app/chat`（兼容旧行为）
+
+---
+
+### OpenClaw Heartbeat 说明
+
+每个用户容器会在工作区生成 `HEARTBEAT.md`。OpenClaw 内置定时心跳，周期性向 AI 发送：
+```
+Read HEARTBEAT.md if it exists. If nothing needs attention, reply HEARTBEAT_OK.
+```
+这会在对话列表产生自动心跳会话，属于 **OpenClaw 自身行为**，不影响正常使用。
+如需关闭，在 `HEARTBEAT.md` 中保持只有注释行（即当前默认状态，OpenClaw 应跳过实际 API 调用，但仍可能创建会话记录）。
+
+---
+
 ## 用户使用说明
 
 1. 访问 `http://<host>:8081`，注册账号（用户名 ≥3 位，密码 ≥6 位）
@@ -355,23 +431,39 @@ sqlite3 /data/openclaw.db 'SELECT user_id, port FROM port_allocations ORDER BY u
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/containers/my` | 查看我的容器状态（含 gatewayToken） |
-| POST | `/api/containers/my/start` | 启动已停止的容器 |
+| GET | `/api/containers/my` | 查看我的第一个容器状态（含 gatewayToken），无容器返回 `null` |
+| GET | `/api/containers/my/all` | 查看我的所有容器列表（含 gatewayToken） |
+| POST | `/api/containers/my/start` | 启动已停止的第一个容器 |
 | GET | `/portal/files` | 列出工作区文件 |
 | POST | `/portal/upload/{*path}` | 上传文件 |
 | DELETE | `/portal/files/{*path}` | 删除文件 |
-| ANY | `/app/**` | HTTP/WS 代理到容器 |
+| ANY | `/app/**` | HTTP/WS 代理到用户第一个容器 |
+| ANY | `/app-c/{containerName}/**` | HTTP 代理到指定容器名的容器 |
 
 ### 管理员接口（需 ADMIN 角色）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/admin/containers` | 所有容器列表 |
-| POST | `/api/admin/containers/{uid}/stop` | 停止容器 |
-| POST | `/api/admin/containers/{uid}/remove` | 删除容器（保留数据） |
-| GET | `/api/admin/users` | 用户列表 |
+| GET | `/api/admin/containers` | 所有容器列表（含 `id`、`username` 字段） |
+| POST | `/api/admin/containers/{uid}/create` | 为用户创建新容器（同一用户可多次创建） |
+| POST | `/api/admin/containers/{uid}/stop` | 按 userId 停止第一个容器 |
+| POST | `/api/admin/containers/{uid}/remove` | 按 userId 删除第一个容器 |
+| POST | `/api/admin/containers/id/{cid}/stop` | 按容器 DB ID 停止（多容器场景使用） |
+| POST | `/api/admin/containers/id/{cid}/start` | 按容器 DB ID 启动 |
+| POST | `/api/admin/containers/id/{cid}/remove` | 按容器 DB ID 删除 |
+| GET | `/api/admin/users` | 用户列表（`containerNames` 为容器名数组，替代旧的 `containerStatus`） |
+| GET | `/api/admin/stats` | 容器统计（total/running/stopped） |
 | GET | `/api/admin/config` | 读取平台配置 |
 | PUT | `/api/admin/config` | 更新平台配置 |
+
+### 内部接口（需 X-Internal-Token，Portal → Manager 调用）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/internal/auth/verify` | 验证 JWT |
+| GET | `/internal/containers/{uid}/address` | 按 userId 获取容器地址和 gatewayToken |
+| GET | `/internal/containers/by-name/{name}/address` | 按容器名获取地址和 gatewayToken |
+| POST | `/internal/users/{uid}/heartbeat` | 记录活跃时间并唤醒容器 |
 
 ---
 
@@ -775,3 +867,117 @@ shell.setAttribute = function(name, value) {
 };
 ```
 这样 Lit 无论渲染多少次，我们的 class 始终存在。
+
+---
+
+### 坑15：去掉 unique 约束后忘记同步端口释放逻辑
+
+**现象**：支持多容器后，删除某个容器（`removeContainerKeepVolume`）后该端口仍被占用，
+下次创建容器时端口分配失败或重复分配。
+
+**根本原因**：原来端口表按 `userId` 关联，`releaseByUserId(userId)` 释放该用户所有端口。
+多容器后每个容器独立占用端口，必须按端口号释放，否则一个用户有 N 个容器时，
+删除其中一个会释放全部端口，或完全无法释放。
+
+**解决方案**：`PortAllocationRepository` 新增 `deleteByPort(int port)`，
+`PortAllocatorService` 新增 `releasePort(int port)`，
+所有删除容器的路径均改为 `portAllocator.releasePort(container.getHostPort())`：
+```java
+// ContainerLifecycleService.java
+portAllocator.releasePort(container.getHostPort());
+// ContainerGCScheduler.java（GC 回收也要同步更新）
+portAllocator.releasePort(c.getHostPort());
+```
+
+---
+
+### 坑16：同源 localStorage 导致多容器 admin WebUI 共享会话数据
+
+**现象**：管理台通过 `/admin-proxy/{uid}/**` 访问不同用户的 OpenClaw 容器，
+但 iframe 里的聊天历史、登录状态等是共用的：访问用户 A 的容器再切换到用户 B，
+看到的仍是用户 A 的数据。
+
+**根本原因**：Portal 把所有容器的内容都代理到同一个 origin（如 `localhost:8081`），
+浏览器的 `localStorage` / `sessionStorage` 是按 origin 隔离的，
+所有 `/admin-proxy/**` 路径共用同一份 storage。
+
+**解决方案**：在 ProxyHandler 里给 admin-proxy 路径的 HTML 响应注入清理脚本，
+确保每次进入新容器前清空 storage：
+```java
+// ProxyHandler.java
+if (pathPrefix.startsWith("/admin-proxy/")) {
+    html = injectClearStorageScript(html);
+}
+
+private static String injectClearStorageScript(String html) {
+    String script = """
+        <script data-portal-clear="1">
+        (function(){
+          try { localStorage.clear(); sessionStorage.clear(); } catch(_) {}
+        })();
+        </script>""";
+    if (html.contains("<head>")) return html.replace("<head>", "<head>" + script);
+    return script + html;
+}
+```
+
+---
+
+### 坑17：localStorage.clear() 清除了 OpenClaw 鉴权 token 导致"unauthorized"
+
+**现象**：注入 `localStorage.clear()` 解决多容器共享历史问题后，
+进入 admin WebUI 弹出"unauthorized: gateway token missing"错误，页面无法加载。
+
+**根本原因**：OpenClaw SPA 在首次加载时把 gateway token 存入 localStorage，
+后续 API 请求都从 localStorage 里取 token。
+我们注入的 `localStorage.clear()` 在 SPA 初始化之前执行，
+清空了 token，SPA 找不到 token 就报 unauthorized。
+
+**解决方案**：使用 URL 参数重新注入 token，让 OpenClaw SPA 在 URL 中读取 token
+（`/chat?token={gatewayToken}`）。在 `AdminProxyController` 中，
+对首次 HTML 导航请求（无 `?token=` 参数）重定向到带 token 的 URL：
+```java
+String gatewayToken = containerInfo[1];
+String encodedToken = URLEncoder.encode(gatewayToken, StandardCharsets.UTF_8);
+response.sendRedirect("/admin-proxy/" + uid + "/chat?token=" + encodedToken);
+```
+
+---
+
+### 坑18：重定向逻辑误将静态资源请求也重定向导致空白页
+
+**现象**：加入"首次访问重定向到 `/chat?token=`"逻辑后，页面变成空白，
+控制台报 404 或资源加载失败。
+
+**根本原因**：重定向条件只判断"没有 `?token=`"，但 JS/CSS 静态资源（`/assets/main.js`）
+和 XHR/API 请求（`/api/auth/status`）也没有 `?token=` 参数，
+被错误地重定向到 `/chat?token=`，导致浏览器用 HTML 响应当作 JS/JSON 解析，
+或静态资源路径错误，整个 SPA 崩溃。
+
+**解决方案**：利用 HTTP `Accept` 请求头区分浏览器导航（`text/html`）与其他请求：
+浏览器 HTML 导航请求的 `Accept` 头始终包含 `text/html`，
+而静态资源（`image/*`, `*/*`）和 XHR/fetch（`application/json` 或 `*/*`）均不含 `text/html`。
+仅对 HTML 导航请求执行重定向：
+```java
+String accept = request.getHeader("Accept");
+boolean isHtmlNavigation = accept != null && accept.contains("text/html");
+if (isHtmlNavigation && (query == null || !query.contains("token="))) {
+    // 只有浏览器页面导航才重定向，静态资源和 XHR 直接代理
+    response.sendRedirect("/admin-proxy/" + uid + "/chat?token=" + encodedToken);
+    return;
+}
+```
+
+---
+
+### 坑19：OpenClaw 内置心跳机制在聊天列表中创建"Read HEARTBEAT.md"会话
+
+**现象**：每次创建新对话，聊天历史列表里都会出现"Read HEARTBEAT.md if it exists..."
+这样一条系统会话，用户困惑这是 bug 还是正常行为。
+
+**根本原因**：OpenClaw 内置心跳（Heartbeat）功能，在 Agent 空闲时会定期读取工作区的
+`HEARTBEAT.md` 文件（若存在）以维持会话活跃，该操作会产生可见的 tool-use 记录。
+Docker 镜像里默认包含 `HEARTBEAT.md`，因此每个容器都会触发此行为。
+
+**这是 OpenClaw 的内置特性，不是平台 bug**。如需禁用，可在构建镜像时删除
+`HEARTBEAT.md` 或修改 OpenClaw 的心跳相关配置。

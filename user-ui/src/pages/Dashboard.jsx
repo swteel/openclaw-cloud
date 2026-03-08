@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Card, Button, Tag, Space, Typography, Layout, message } from 'antd'
+import { Card, Button, Tag, Space, Typography, Layout, message, List } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import { PoweroffOutlined, ArrowRightOutlined, LogoutOutlined } from '@ant-design/icons'
 import api from '../api'
@@ -8,35 +8,35 @@ const { Header, Content } = Layout
 const { Title, Text } = Typography
 
 export default function Dashboard({ username, onLogout }) {
-  const [container, setContainer] = useState(null)
+  const [containers, setContainers] = useState([])
   const [loading, setLoading] = useState(false)
-  const [starting, setStarting] = useState(false)
+  const [starting, setStarting] = useState({})
   const navigate = useNavigate()
 
-  const fetchContainer = async () => {
+  const fetchContainers = async () => {
     setLoading(true)
     try {
-      const res = await api.get('/api/containers/my')
-      setContainer(res.data?.data)
+      const res = await api.get('/api/containers/my/all')
+      setContainers(res.data?.data || [])
     } catch {
-      // no container yet
+      // no containers yet
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { fetchContainer() }, [])
+  useEffect(() => { fetchContainers() }, [])
 
-  const startContainer = async () => {
-    setStarting(true)
+  const startContainer = async (containerName) => {
+    setStarting(prev => ({ ...prev, [containerName]: true }))
     try {
       await api.post('/api/containers/my/start')
       message.success('容器启动中...')
-      setTimeout(fetchContainer, 2000)
+      setTimeout(fetchContainers, 2000)
     } catch {
       message.error('启动失败')
     } finally {
-      setStarting(false)
+      setStarting(prev => ({ ...prev, [containerName]: false }))
     }
   }
 
@@ -54,42 +54,59 @@ export default function Dashboard({ username, onLogout }) {
           <Button icon={<LogoutOutlined />} onClick={handleLogout} type="text" style={{ color: '#aaa' }}>退出</Button>
         </Space>
       </Header>
-      <Content style={{ padding: 40, maxWidth: 600, margin: '40px auto', width: '100%' }}>
+      <Content style={{ padding: 40, maxWidth: 700, margin: '40px auto', width: '100%' }}>
         <Title level={4}>我的实例</Title>
         <Card loading={loading}>
-          {container ? (
-            <Space direction="vertical" size="large" style={{ width: '100%' }}>
-              <div>
-                <Text type="secondary">容器名称：</Text>
-                <Text>{container.containerName}</Text>
-              </div>
-              <div>
-                <Text type="secondary">状态：</Text>
-                <Tag color={container.status === 'RUNNING' ? 'green' : 'orange'}>{container.status}</Tag>
-              </div>
-              {container.startedAt && (
-                <div>
-                  <Text type="secondary">启动时间：</Text>
-                  <Text>{new Date(container.startedAt).toLocaleString('zh-CN')}</Text>
-                </div>
+          {containers.length > 0 ? (
+            <List
+              dataSource={containers}
+              renderItem={container => (
+                <List.Item
+                  key={container.containerName}
+                  actions={[
+                    container.status === 'STOPPED' && (
+                      <Button
+                        key="start"
+                        type="primary"
+                        icon={<PoweroffOutlined />}
+                        loading={!!starting[container.containerName]}
+                        onClick={() => startContainer(container.containerName)}
+                      >
+                        启动
+                      </Button>
+                    ),
+                    container.status === 'RUNNING' && (
+                      <Button
+                        key="enter"
+                        type="primary"
+                        icon={<ArrowRightOutlined />}
+                        onClick={() => navigate('/workbench', { state: { containerName: container.containerName } })}
+                      >
+                        进入工作台
+                      </Button>
+                    ),
+                  ].filter(Boolean)}
+                >
+                  <List.Item.Meta
+                    title={<Text>{container.containerName}</Text>}
+                    description={
+                      <Space>
+                        <Tag color={container.status === 'RUNNING' ? 'green' : 'orange'}>{container.status}</Tag>
+                        {container.startedAt && (
+                          <Text type="secondary">启动时间：{new Date(container.startedAt).toLocaleString('zh-CN')}</Text>
+                        )}
+                      </Space>
+                    }
+                  />
+                </List.Item>
               )}
-              <Space>
-                {container.status === 'STOPPED' && (
-                  <Button type="primary" icon={<PoweroffOutlined />} loading={starting} onClick={startContainer}>
-                    启动容器
-                  </Button>
-                )}
-                {container.status === 'RUNNING' && (
-                  <Button type="primary" icon={<ArrowRightOutlined />} onClick={() => navigate('/workbench')}>
-                    进入工作台
-                  </Button>
-                )}
-                <Button onClick={fetchContainer}>刷新</Button>
-              </Space>
-            </Space>
+            />
           ) : (
             <Text type="secondary">暂无容器，请联系管理员</Text>
           )}
+          <div style={{ marginTop: 16 }}>
+            <Button onClick={fetchContainers}>刷新</Button>
+          </div>
         </Card>
       </Content>
     </Layout>
