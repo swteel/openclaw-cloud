@@ -630,3 +630,148 @@ sqlite3 /data/openclaw.db 'SELECT user_id, container_name, host_port, status FRO
 
 **预防**：不要手动操作 Docker 容器（删除、重建）；如必须操作，重启 manager 后
 让自动同步调度器（每 2 分钟）自动修正 DB 状态。
+
+---
+
+### 坑9：Docker build 缓存导致旧 JAR 被打入新镜像
+
+**现象**：修改 Java 代码、重新 `mvn package`、`docker build`，但运行时行为没有变化。
+日志显示的 JAR 修改时间仍是旧的，新功能不生效。
+
+**根本原因**：`docker build` 使用了缓存层，`COPY app.jar /app/app.jar` 那一层没有失效，
+实际打入的还是之前构建的旧 JAR。即便文件内容变了，Docker 也可能因 layer hash 未变而复用缓存。
+
+**正确做法**：跳过镜像重建，直接把 JAR 拷进运行中的容器并重启：
+```bash
+mvn package -DskipTests -pl portal
+docker cp portal/target/portal-1.0.0.jar openclaw-platform_portal_1:/app/app.jar
+docker restart openclaw-platform_portal_1
+```
+比重建镜像快 10 倍以上，适合开发期快速迭代。如需完全重建镜像（发布生产），加 `--no-cache`：
+```bash
+docker build --no-cache -t openclaw-portal:latest portal/
+```
+
+---
+
+### 坑10：`@PathVariable` 不加显式名称导致 500
+
+**现象**：访问 `/admin-proxy/2/` 报 500，日志：
+`IllegalArgumentException: Name for argument of type [java.lang.Long] not specified`
+
+**根本原因**：Spring MVC 默认通过字节码反射获取参数名，
+但 Maven 未配置 `-parameters` 编译选项时，泛型参数名被擦除，
+`@PathVariable Long uid` 无法推断变量名为 `uid`。
+
+**解决方案**：显式指定名称：
+```java
+// 错误
+@PathVariable Long uid
+
+// 正确
+@PathVariable("uid") Long uid
+```
+
+---
+
+### 坑11：AuthFilter `chain.doFilter` 放在 try-catch 内导致下游异常被误判为 401
+
+**现象**：管理员 token 合法，但访问 `/app/**` 或 `/admin-proxy/**` 总是返回 401。
+
+**根本原因**：
+```java
+try {
+    verifyToken();    // 鉴权
+    chain.doFilter(); // 继续处理请求
+} catch (Exception e) {
+    response.sendError(401); // 原意：鉴权失败
+}
+```
+`chain.doFilter()` 在 try 块内，下游（ProxyHandler）抛出的任何异常（如用户无容器、容器不可达）
+都会被这个 catch 捕获，错误地返回 401 而不是实际的 502/503。
+
+**解决方案**：把 `chain.doFilter()` 移到 try-catch 外：
+```java
+try {
+    userInfo = verifyToken(); // 只捕获鉴权异常
+} catch (Exception e) {
+    response.sendError(401, "Invalid token");
+    return;
+}
+// 鉴权成功后，下游异常不再被误捕获
+chain.doFilter(req, res);
+```
+
+---
+
+### 坑12：openclaw-app 渲染到 Light DOM，不是 Shadow DOM
+
+**现象**：向 `openclaw-app` 的 Shadow Root 注入 CSS / 操作 `.shell` 元素，
+完全无效，`appEl.shadowRoot` 始终为 `null`。
+
+**根本原因**：Lit 文档默认行为是使用 Shadow DOM，但 openclaw 重写了 `createRenderRoot()`，
+令其返回 `this`（元素本身）而非 shadow root。
+所有 `.shell`、`.topbar`、`.nav` 元素都是 `openclaw-app` 的普通子元素，在 Light DOM 中。
+
+**正确做法**：直接用 `document.querySelector('.shell')` 查找，CSS 注入到 `document.head`：
+```javascript
+// 错误：shadow root 不存在
+const shell = appEl.shadowRoot.querySelector('.shell');
+appEl.shadowRoot.appendChild(style);
+
+// 正确：直接查 document
+const shell = document.querySelector('.shell');
+document.head.appendChild(style);
+```
+
+**验证方法**：
+```javascript
+document.querySelector('openclaw-app').shadowRoot; // null → Light DOM
+document.querySelector('openclaw-app').childElementCount; // > 0 → 子元素在 Light DOM
+```
+
+---
+
+### 坑13：openclaw 的 CSP 策略阻止注入的内联脚本执行
+
+**现象**：在 HTML 响应里注入 `<script>` 隐藏 topbar/nav，脚本不执行，控制台报错：
+```
+Executing inline script violates Content Security Policy directive 'script-src 'self''
+```
+
+**根本原因**：openclaw 的 HTTP 响应头包含严格 CSP，禁止内联脚本（`unsafe-inline`）。
+浏览器直接阻止脚本执行，没有任何运行时错误提示。
+
+**解决方案**：在 Portal 代理层剥离 openclaw 的 `Content-Security-Policy` 响应头：
+```java
+// ProxyHandler.java：复制响应头时直接跳过 CSP
+if ("content-security-policy".equals(nameLower)) {
+    return; // 不转发此头，允许我们的注入脚本运行
+}
+```
+由于 openclaw 已通过 Portal 代理鉴权，这里去掉 CSP 不会引入实际安全风险。
+
+---
+
+### 坑14：Lit 每次重新渲染会覆盖手动修改的 class 属性
+
+**现象**：用 JavaScript 给 `.shell` 元素加上 `shell--onboarding` class，
+几百毫秒后 class 消失，topbar/nav 重新出现。
+
+**根本原因**：Lit 的模板绑定（`class="shell ${r} ${d} ..."`）在每次响应式状态变化时
+都会调用 `element.setAttribute('class', 新值)`，完整替换 class 属性，
+手动添加的类被清除。
+
+**解决方案**：拦截 `.shell` 元素的 `setAttribute` 方法，强制在每次调用时注入我们的类：
+```javascript
+const orig = shell.setAttribute.bind(shell);
+shell.setAttribute = function(name, value) {
+    if (name === 'class') {
+        const set = new Set(value.trim().split(/\s+/).filter(Boolean));
+        ['shell--onboarding', 'shell--chat-focus'].forEach(c => set.add(c));
+        value = Array.from(set).join(' ');
+    }
+    orig(name, value);
+};
+```
+这样 Lit 无论渲染多少次，我们的 class 始终存在。
