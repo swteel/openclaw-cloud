@@ -1,7 +1,7 @@
 import React from 'react'
 import { Layout, Space, Typography, Button } from 'antd'
 import { LogoutOutlined, DashboardOutlined } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import FilePanel from './FilePanel'
 import OpenClawFrame from './OpenClawFrame'
 import api from '../../api'
@@ -11,6 +11,8 @@ const { Text } = Typography
 
 export default function Workbench({ username, onLogout }) {
   const navigate = useNavigate()
+  const location = useLocation()
+  const containerName = location.state?.containerName
 
   const handleLogout = async () => {
     await api.get('/portal/logout')
@@ -57,7 +59,7 @@ export default function Workbench({ username, onLogout }) {
           width={260}
           style={{ background: '#fafafa', borderRight: '1px solid #e8e8e8', overflow: 'auto' }}
         >
-          <FilePanel />
+          <FilePanel containerName={containerName} />
         </Sider>
         <Content style={{ flex: 1, overflow: 'hidden' }}>
           <OpenClawFrame />

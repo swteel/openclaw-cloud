@@ -8,7 +8,6 @@ import com.openclaw.manager.domain.repository.UserRepository;
 import com.openclaw.manager.dto.ApiResponse;
 import com.openclaw.manager.dto.ContainerInfo;
 import com.openclaw.manager.service.ContainerLifecycleService;
-import com.openclaw.manager.service.PlatformConfigService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -26,15 +25,13 @@ public class AdminController {
     private final ContainerLifecycleService containerService;
     private final ContainerRepository containerRepo;
     private final UserRepository userRepo;
-    private final PlatformConfigService configService;
     private final PlatformProperties props;
 
     public AdminController(ContainerLifecycleService containerService, ContainerRepository containerRepo,
-                           UserRepository userRepo, PlatformConfigService configService, PlatformProperties props) {
+                           UserRepository userRepo, PlatformProperties props) {
         this.containerService = containerService;
         this.containerRepo = containerRepo;
         this.userRepo = userRepo;
-        this.configService = configService;
         this.props = props;
     }
 
@@ -155,21 +152,4 @@ public class AdminController {
         return ResponseEntity.ok(ApiResponse.ok(null));
     }
 
-    @GetMapping("/config")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> getConfig() {
-        Map<String, Object> config = new LinkedHashMap<>();
-        String apiKey = configService.get("dashscope_api_key");
-        config.put("dashscopeApiKey", apiKey != null ? "****" + apiKey.substring(Math.max(0, apiKey.length() - 4)) : "");
-        config.put("maxContainers", props.getMaxContainers());
-        config.put("portRange", props.getPortRangeStart() + "-" + props.getPortRangeEnd());
-        return ResponseEntity.ok(ApiResponse.ok(config));
-    }
-
-    @PutMapping("/config")
-    public ResponseEntity<ApiResponse<Void>> updateConfig(@RequestBody Map<String, String> body) {
-        if (body.containsKey("dashscopeApiKey") && !body.get("dashscopeApiKey").isBlank()) {
-            configService.set("dashscope_api_key", body.get("dashscopeApiKey"));
-        }
-        return ResponseEntity.ok(ApiResponse.ok(null));
-    }
 }

@@ -4,13 +4,11 @@ import { Layout, Menu, Button, Typography, Space, Spin } from 'antd'
 import {
   ContainerOutlined,
   UserOutlined,
-  SettingOutlined,
   LogoutOutlined,
 } from '@ant-design/icons'
 import Login from './pages/Login'
 import ContainerList from './pages/ContainerList'
 import UserList from './pages/UserList'
-import PlatformConfig from './pages/PlatformConfig'
 import api from './api'
 
 const { Header, Sider, Content } = Layout
@@ -23,7 +21,6 @@ function AdminLayout({ username, onLogout }) {
   const menuItems = [
     { key: '/containers', icon: <ContainerOutlined />, label: <Link to="/admin/containers">容器列表</Link> },
     { key: '/users', icon: <UserOutlined />, label: <Link to="/admin/users">用户列表</Link> },
-    { key: '/config', icon: <SettingOutlined />, label: <Link to="/admin/config">平台配置</Link> },
   ]
 
   return (
@@ -51,7 +48,6 @@ function AdminLayout({ username, onLogout }) {
             <Route path="/admin" element={<Navigate to="/admin/containers" replace />} />
             <Route path="/admin/containers" element={<ContainerList />} />
             <Route path="/admin/users" element={<UserList />} />
-            <Route path="/admin/config" element={<PlatformConfig />} />
           </Routes>
         </Content>
       </Layout>

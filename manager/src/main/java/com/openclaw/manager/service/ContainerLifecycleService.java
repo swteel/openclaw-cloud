@@ -3,10 +3,10 @@ package com.openclaw.manager.service;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.model.*;
-import com.openclaw.manager.config.PlatformProperties;
 import com.openclaw.manager.domain.entity.Container;
 import com.openclaw.manager.domain.entity.User;
 import com.openclaw.manager.domain.repository.ContainerRepository;
+import com.openclaw.manager.config.PlatformProperties;
 import com.openclaw.manager.dto.ContainerInfo;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -33,16 +33,13 @@ public class ContainerLifecycleService {
     private final ContainerRepository containerRepo;
     private final PortAllocatorService portAllocator;
     private final PlatformProperties props;
-    private final PlatformConfigService configService;
 
     public ContainerLifecycleService(DockerClient docker, ContainerRepository containerRepo,
-                                     PortAllocatorService portAllocator, PlatformProperties props,
-                                     PlatformConfigService configService) {
+                                     PortAllocatorService portAllocator, PlatformProperties props) {
         this.docker = docker;
         this.containerRepo = containerRepo;
         this.portAllocator = portAllocator;
         this.props = props;
-        this.configService = configService;
     }
 
     @Transactional
@@ -82,27 +79,39 @@ public class ContainerLifecycleService {
             log.warn("Stale container check failed: {}", e.getMessage());
         }
 
-        CreateContainerResponse created = docker.createContainerCmd(props.getContainerImage())
-                .withName(containerName)
-                .withExposedPorts(exposedPort)
-                .withHostConfig(HostConfig.newHostConfig()
-                        .withPortBindings(portBindings)
-                        .withBinds(new Bind(volumeName, dataVolume))
-                        .withRestartPolicy(RestartPolicy.unlessStoppedRestart()))
-                .withEnv(
-                        "OPENCLAW_GATEWAY_TOKEN=" + user.getGatewayToken(),
-                        "DASHSCOPE_API_KEY=" + configService.get("dashscope_api_key", props.getDashscopeApiKey())
-                )
-                .exec();
+        String containerId = null;
+        try {
+            CreateContainerResponse created = docker.createContainerCmd(props.getContainerImage())
+                    .withName(containerName)
+                    .withExposedPorts(exposedPort)
+                    .withHostConfig(HostConfig.newHostConfig()
+                            .withPortBindings(portBindings)
+                            .withBinds(new Bind(volumeName, dataVolume))
+                            .withRestartPolicy(RestartPolicy.unlessStoppedRestart()))
+                    .withEnv(
+                            "OPENCLAW_GATEWAY_TOKEN=" + user.getGatewayToken()
+                    )
+                    .exec();
+            containerId = created.getId();
 
-        injectOpenclawConfig(created.getId());
-        docker.startContainerCmd(created.getId()).exec();
+            injectOpenclawConfig(containerId);
+            docker.startContainerCmd(containerId).exec();
+        } catch (Exception e) {
+            // Release the allocated port so it can be reused on the next attempt
+            portAllocator.releasePort(hostPort);
+            // Remove the container if it was created but failed to start
+            if (containerId != null) {
+                try { docker.removeContainerCmd(containerId).withForce(true).exec(); } catch (Exception ignored) {}
+            }
+            log.error("Failed to create/start container {} for user {}: {}", containerName, user.getId(), e.getMessage());
+            throw new RuntimeException("Failed to start container: " + e.getMessage(), e);
+        }
 
         // Connect to platform network so portal can reach it by container name
         try {
             docker.connectToNetworkCmd()
                     .withNetworkId(props.getPlatformNetwork())
-                    .withContainerId(created.getId())
+                    .withContainerId(containerId)
                     .exec();
         } catch (Exception e) {
             log.warn("Could not connect container {} to network {}: {}", containerName, props.getPlatformNetwork(), e.getMessage());
@@ -110,7 +119,7 @@ public class ContainerLifecycleService {
 
         Container container = new Container();
         container.setUserId(user.getId());
-        container.setContainerId(created.getId());
+        container.setContainerId(containerId);
         container.setContainerName(containerName);
         container.setHostPort(hostPort);
         container.setStatus("RUNNING");
@@ -149,12 +158,11 @@ public class ContainerLifecycleService {
 
     @Transactional
     public void wakeIfNeeded(Long userId) {
-        Container container = containerRepo.findFirstByUserId(userId)
-                .orElseThrow(() -> new IllegalArgumentException("No container for user " + userId));
+        Container container = containerRepo.findFirstByUserId(userId).orElse(null);
+        if (container == null) return; // admin or user with no container — nothing to wake
 
         if ("STOPPED".equals(container.getStatus())) {
             try {
-                injectOpenclawConfig(container.getContainerId());
                 docker.startContainerCmd(container.getContainerId()).exec();
                 container.setStatus("RUNNING");
                 container.setStartedAt(LocalDateTime.now());
@@ -180,7 +188,6 @@ public class ContainerLifecycleService {
             return toInfo(container);
         }
 
-        injectOpenclawConfig(container.getContainerId());
         docker.startContainerCmd(container.getContainerId()).exec();
         container.setStatus("RUNNING");
         container.setStartedAt(LocalDateTime.now());
@@ -237,9 +244,9 @@ public class ContainerLifecycleService {
     }
 
     /**
-     * Copies a custom openclaw config into the container that sets allowedOrigins: ["*"],
-     * overriding the image's default config-template.json.
-     * The gateway token placeholder is preserved for openclaw's own env-var substitution.
+     * Injects platform gateway config into the container's config-template.json.
+     * Called only on first container creation — never on wake/restart, so that
+     * user settings saved via the WebUI are preserved across restarts.
      */
     private void injectOpenclawConfig(String containerId) {
         String config = """
@@ -250,49 +257,11 @@ public class ContainerLifecycleService {
                     "controlUi": { "allowedOrigins": ["*"] },
                     "trustedProxies": ["172.0.0.0/8", "10.0.0.0/8", "192.168.0.0/16"]
                   },
-                  "models": {
-                    "providers": {
-                      "qwen-portal": {
-                        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                        "apiKey": "${DASHSCOPE_API_KEY}",
-                        "api": "openai-completions",
-                        "models": [
-                          {
-                            "id": "coder-model", "name": "Qwen Coder", "reasoning": false,
-                            "input": ["text"],
-                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                            "contextWindow": 128000, "maxTokens": 8192
-                          },
-                          {
-                            "id": "vision-model", "name": "Qwen Vision", "reasoning": false,
-                            "input": ["text", "image"],
-                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                            "contextWindow": 128000, "maxTokens": 8192
-                          }
-                        ]
-                      }
-                    }
-                  },
-                  "agents": {
-                    "defaults": {
-                      "model": {
-                        "primary": "qwen-portal/coder-model",
-                        "fallbacks": ["qwen-portal/vision-model"]
-                      },
-                      "models": {
-                        "qwen-portal/coder-model": {"alias": "qwen"},
-                        "qwen-portal/vision-model": {}
-                      },
-                      "compaction": {"mode": "safeguard"},
-                      "maxConcurrent": 4,
-                      "subagents": {"maxConcurrent": 8}
-                    }
-                  },
                   "tools": { "profile": "full" },
                   "browser": { "attachOnly": false },
                   "commands": {
                     "native": "auto", "nativeSkills": "auto",
-                    "restart": true, "ownerDisplay": "raw"
+                    "restart": false, "ownerDisplay": "raw"
                   }
                 }
                 """;

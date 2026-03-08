@@ -20,12 +20,6 @@ public class AuthFilter implements Filter {
     private static final Logger log = LoggerFactory.getLogger(AuthFilter.class);
     private static final String COOKIE_NAME = "openclaw_token";
 
-    // Sensitive paths in /app that non-admin users cannot access
-    private static final String[] BLOCKED_PATHS = {
-        "/app/config", "/app/settings", "/app/providers",
-        "/app/nodes", "/app/cron", "/app/debug", "/app/usage"
-    };
-
     private final ManagerClient managerClient;
 
     public AuthFilter(ManagerClient managerClient) {
@@ -51,6 +45,7 @@ public class AuthFilter implements Filter {
                 || path.startsWith("/app-c/")
                 || path.startsWith("/portal/upload/")
                 || path.equals("/portal/files") || path.startsWith("/portal/files/")
+                || path.startsWith("/portal/container-files/")
                 || path.startsWith("/api/admin/") || path.equals("/api/admin")
                 || path.startsWith("/api/containers/") || path.equals("/api/containers")
                 || path.startsWith("/admin-proxy/");
@@ -82,16 +77,6 @@ public class AuthFilter implements Filter {
         request.setAttribute("role", role);
         request.setAttribute("token", token);
 
-        // Block sensitive paths for non-admin users
-        if (!"ADMIN".equals(role)) {
-            for (String blocked : BLOCKED_PATHS) {
-                if (path.startsWith(blocked)) {
-                    response.sendError(HttpServletResponse.SC_FORBIDDEN, "Access denied");
-                    return;
-                }
-            }
-        }
-
         // Send heartbeat asynchronously (best-effort)
         try {
             managerClient.heartbeat(userId);
@@ -117,6 +102,8 @@ public class AuthFilter implements Filter {
         if (header != null && header.startsWith("Bearer ")) {
             return header.substring(7);
         }
+        // Note: URL query parameter token is gateway token (not JWT), used by OpenClaw container auth
+        // Do not use it for portal auth verification
         return null;
     }
 }

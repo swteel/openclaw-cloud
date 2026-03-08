@@ -46,6 +46,10 @@ public class WebSocketConfig implements WebSocketConfigurer {
         registry.addHandler(wsProxyHandler, "/admin-proxy/**")
                 .addInterceptors(new AdminProxyHandshakeInterceptor(managerClient))
                 .setAllowedOriginPatterns("*");
+        // Container-specific WebSocket: /app-c/{containerName}/**
+        registry.addHandler(wsProxyHandler, "/app-c/**")
+                .addInterceptors(new ContainerProxyHandshakeInterceptor(managerClient))
+                .setAllowedOriginPatterns("*");
     }
 
     /**
@@ -82,6 +86,15 @@ public class WebSocketConfig implements WebSocketConfigurer {
                     adminWsHandler.setHandshakeInterceptors(List.of(adminInterceptor));
                     return adminWsHandler;
                 }
+                // Container-specific WS: /app-c/{containerName}/...
+                if (uri.startsWith("/app-c/")) {
+                    ContainerProxyHandshakeInterceptor containerInterceptor =
+                            new ContainerProxyHandshakeInterceptor(managerClient);
+                    WebSocketHttpRequestHandler containerWsHandler =
+                            new WebSocketHttpRequestHandler(wsProxyHandler, new DefaultHandshakeHandler());
+                    containerWsHandler.setHandshakeInterceptors(List.of(containerInterceptor));
+                    return containerWsHandler;
+                }
                 return null;
             }
         };
@@ -115,6 +128,20 @@ public class WebSocketConfig implements WebSocketConfigurer {
                     String auth = servletRequest.getServletRequest().getHeader("Authorization");
                     if (auth != null && auth.startsWith("Bearer ")) {
                         token = auth.substring(7);
+                    }
+                }
+
+                // Also check URL query parameter for token (from iframe src with ?token=xxx)
+                if (token == null) {
+                    String query = servletRequest.getServletRequest().getQueryString();
+                    if (query != null) {
+                        String[] params = query.split("&");
+                        for (String param : params) {
+                            if (param.startsWith("token=")) {
+                                token = param.substring(6);
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -167,6 +194,20 @@ public class WebSocketConfig implements WebSocketConfigurer {
                 String auth = servletRequest.getServletRequest().getHeader("Authorization");
                 if (auth != null && auth.startsWith("Bearer ")) token = auth.substring(7);
             }
+            
+            // Also check URL query parameter for token
+            if (token == null) {
+                String query = servletRequest.getServletRequest().getQueryString();
+                if (query != null) {
+                    String[] params = query.split("&");
+                    for (String param : params) {
+                        if (param.startsWith("token=")) {
+                            token = param.substring(6);
+                            break;
+                        }
+                    }
+                }
+            }
             if (token == null) return false;
 
             try {
@@ -183,6 +224,63 @@ public class WebSocketConfig implements WebSocketConfigurer {
                     Long targetUserId = Long.parseLong(parts[2]);
                     attributes.put("targetUserId", targetUserId);
                 }
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @Override
+        public void afterHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                                   WebSocketHandler wsHandler, Exception exception) {
+        }
+    }
+
+    /**
+     * Handshake interceptor for /app-c/{containerName}/** WebSocket connections.
+     * Extracts containerName from path and JWT token from cookie/header (NOT from query param).
+     * Note: The ?token=xxx in URL is gateway token for OpenClaw container, not JWT for portal auth.
+     */
+    static class ContainerProxyHandshakeInterceptor implements HandshakeInterceptor {
+        private static final String COOKIE_NAME = "openclaw_token";
+        private final ManagerClient managerClient;
+
+        ContainerProxyHandshakeInterceptor(ManagerClient managerClient) {
+            this.managerClient = managerClient;
+        }
+
+        @Override
+        public boolean beforeHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                                       WebSocketHandler wsHandler, Map<String, Object> attributes) {
+            if (!(request instanceof ServletServerHttpRequest servletRequest)) return false;
+
+            // Extract containerName from path: /app-c/{containerName}/...
+            String path = servletRequest.getServletRequest().getRequestURI();
+            String afterPrefix = path.replaceFirst("^/app-c/", "");
+            int slash = afterPrefix.indexOf('/');
+            String containerName = slash >= 0 ? afterPrefix.substring(0, slash) : afterPrefix;
+            if (containerName == null || containerName.isEmpty()) return false;
+            attributes.put("containerName", containerName);
+
+            // Extract JWT token from cookie or header ONLY (NOT from query param)
+            // Query param ?token=xxx is gateway token, not JWT
+            String token = null;
+            Cookie[] cookies = servletRequest.getServletRequest().getCookies();
+            if (cookies != null) {
+                token = Arrays.stream(cookies)
+                        .filter(c -> COOKIE_NAME.equals(c.getName()))
+                        .map(Cookie::getValue).findFirst().orElse(null);
+            }
+            if (token == null) {
+                String auth = servletRequest.getServletRequest().getHeader("Authorization");
+                if (auth != null && auth.startsWith("Bearer ")) token = auth.substring(7);
+            }
+            if (token == null) return false;
+
+            try {
+                Map<String, Object> userInfo = managerClient.verifyToken(token);
+                Long userId = ((Number) userInfo.get("userId")).longValue();
+                attributes.put("userId", userId);
                 return true;
             } catch (Exception e) {
                 return false;
