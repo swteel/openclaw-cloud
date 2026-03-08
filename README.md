@@ -58,16 +58,49 @@ Manager (port 8080，仅内网)
 
 ## 前提条件
 
+### 主机配置建议
+
+| 资源 | 最低 | 推荐 |
+|------|------|------|
+| CPU | 2 核 | 4 核+ |
+| 内存 | 4 GB | 8 GB+（每个运行中的 openclaw 容器约占 400-800 MB） |
+| 磁盘 | 20 GB | 40 GB+（openclaw 镜像构建后约 2 GB，每个数据 volume 额外占用） |
+
+### 软件依赖
+
 | 软件 | 版本要求 | 用途 |
 |------|---------|------|
 | Docker | ≥ 24.x | 运行所有服务和用户容器 |
-| Docker Compose | ≥ 1.29 或 v2 | 服务编排 |
+| Docker Compose | v2（推荐）或 v1.29 | 服务编排 |
 | Java | 17 | 编译 Spring Boot 服务 |
 | Maven | ≥ 3.8 | Java 项目构建 |
 | Node.js | ≥ 18 | 编译前端（admin-ui / user-ui） |
 
-> **注意**：如果当前用户不在 `docker` 组，所有 `docker` / `docker-compose` 命令前需加 `sudo`，
-> 或执行 `sudo usermod -aG docker $USER` 并重新登录。
+### Ubuntu/Debian 一键安装依赖
+
+```bash
+# Docker（官方脚本，自动适配版本）
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+newgrp docker   # 当前会话立即生效，或重新登录
+
+# Java 17 + Maven
+sudo apt install -y openjdk-17-jdk maven
+
+# Node.js 18
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# python3-bcrypt（初始化管理员密码时需要）
+sudo apt install -y python3-pip && pip3 install bcrypt
+```
+
+> **Docker Compose v2 说明**：Ubuntu 22.04+ 默认只有 `docker compose`（插件），
+> 无 `docker-compose`（v1 命令）。本项目脚本使用 `docker-compose`，若报 `command not found`，
+> 请安装 v1：`sudo apt install docker-compose`，或将所有 `docker-compose` 替换为 `docker compose`。
+
+> **防火墙**：云主机（阿里云/腾讯云/AWS 等）需在安全组放开 **TCP 8081** 端口。
+> 端口 20000-25000 为 Docker 内网通信，**不要**对外暴露。
 
 ---
 
@@ -76,9 +109,13 @@ Manager (port 8080，仅内网)
 ### 第一步：获取代码
 
 ```bash
-git clone <仓库地址>
+git clone https://github.com/swteel/openclaw-cloud.git openclaw-platform
 cd openclaw-platform
 ```
+
+> **重要**：目录名必须为 `openclaw-platform`（或修改后续 `.env` 中的 `PLATFORM_NETWORK`）。
+> Docker Compose 默认网络名 = `{目录名}_default`，Manager 通过 `PLATFORM_NETWORK` 变量
+> 把用户容器加入同一网络。若目录名不一致，所有用户容器将无法被 Portal 代理到。
 
 ### 第二步：构建 OpenClaw 用户容器镜像
 
@@ -90,8 +127,15 @@ docker build -t openclaw-platform:latest .
 cd ..
 ```
 
-> 这一步需要下载 Chromium 和 npm 包，国内建议挂代理或配置 npm 镜像（Dockerfile 已配置 npmmirror）。
-> 构建完成后用 `docker images | grep openclaw-platform` 确认镜像存在。
+> 这一步需要下载 Chromium（约 300 MB）和 npm 包，国内建议挂代理或配置 apt/npm 镜像（Dockerfile 已配置 npmmirror）。
+> 构建耗时约 5-15 分钟（取决于网速），构建完成后用以下命令确认镜像存在：
+>
+> ```bash
+> docker images | grep openclaw-platform
+> # 预期：openclaw-platform   latest   ...
+> ```
+>
+> **此步骤必须在第六步之前完成**，否则用户注册时自动创建容器会失败。
 
 ### 第三步：配置环境变量
 
@@ -133,6 +177,9 @@ cd admin-ui && npm install && npm run build && cd ..
 ```
 
 > 编译产物会自动输出到 `portal/src/main/resources/static/` 目录。
+>
+> **注意**：`deploy.sh` 不包含前端编译，必须手动先完成此步骤再执行后续构建，
+> 否则 Portal 中不会包含 UI 资源。
 
 ### 第五步：编译 Java 服务
 
@@ -145,15 +192,16 @@ mvn package -DskipTests
 ### 第六步：构建 Docker 镜像并启动
 
 ```bash
-docker-compose build
-docker-compose up -d
+# Docker Compose v1
+docker-compose build && docker-compose up -d
+
+# Docker Compose v2（Ubuntu 22.04+）
+docker compose build && docker compose up -d
 ```
 
-或者使用一键脚本（自动完成第五、六步）：
-
-```bash
-./deploy.sh
-```
+> **注意**：`deploy.sh` 仅自动执行第五、六步（Java 编译 + Docker 构建/启动），
+> 不包含前端编译（第四步）和 openclaw 镜像构建（第二步）。
+> 完整流程必须按顺序手动执行每个步骤。
 
 ### 第七步：验证部署
 
@@ -264,8 +312,12 @@ spring:
 首次部署后，需要手动初始化管理员账号（manager 容器内无 python3/sqlite3，需借助 alpine 临时容器操作）：
 
 ```bash
+# 0. 确保 python3-bcrypt 已安装（主机上执行）
+pip3 install bcrypt 2>/dev/null || sudo apt install -y python3-bcrypt
+
 # 1. 停止 manager（避免 DB 写冲突）
-docker stop openclaw-platform_manager_1
+docker stop openclaw-platform-manager-1 2>/dev/null \
+  || docker stop openclaw-platform_manager_1 2>/dev/null
 
 # 2. 生成密码哈希（以密码 "yourpassword" 为例）
 HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt(10)).decode())")
@@ -281,22 +333,28 @@ sqlite3 /data/openclaw.db < /tmp/init.sql
 "
 
 # 4. 重启 manager
-docker-compose up -d manager
+docker-compose up -d manager 2>/dev/null || docker compose up -d manager
 ```
 
 > **注意**：管理员账号无对应 Docker 容器，只能访问管理台 `/admin/`，不能使用工作台。
+>
+> **容器名说明**：Docker Compose v1 生成的容器名为 `openclaw-platform_manager_1`（下划线），
+> v2 生成的为 `openclaw-platform-manager-1`（短横线）。
+> 用 `docker ps | grep manager` 查看实际容器名。
 
 ### 提升现有用户为管理员
 
 ```bash
-docker stop openclaw-platform_manager_1
+# 停止 manager（查看实际容器名：docker ps | grep manager）
+docker stop openclaw-platform-manager-1 2>/dev/null \
+  || docker stop openclaw-platform_manager_1 2>/dev/null
 
 docker run --rm -v openclaw-platform_manager-data:/data alpine sh -c "
 apk add --no-cache sqlite 2>/dev/null | tail -1
 sqlite3 /data/openclaw.db \"UPDATE users SET role='ADMIN' WHERE username='your_username';\"
 "
 
-docker-compose up -d manager
+docker-compose up -d manager 2>/dev/null || docker compose up -d manager
 ```
 
 ### 查询数据库
