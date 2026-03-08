@@ -117,7 +117,10 @@ public class ProxyHandler {
                 if (ct.startsWith("text/html")) {
                     byte[] bytes = body.readAllBytes();
                     String html = new String(bytes, StandardCharsets.UTF_8);
-                    html = injectHideScript(html);
+                    // Only hide topbar/nav for regular user proxy (/app), not admin proxy
+                    if ("/app".equals(pathPrefix)) {
+                        html = injectHideScript(html);
+                    }
                     byte[] out = html.getBytes(StandardCharsets.UTF_8);
                     response.setContentLength(out.length);
                     response.getOutputStream().write(out);
