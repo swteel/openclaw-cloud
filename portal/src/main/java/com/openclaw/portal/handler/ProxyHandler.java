@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -104,19 +105,25 @@ public class ProxyHandler {
                 // Remove X-Frame-Options so the iframe can embed the app
                 if ("x-frame-options".equals(nameLower)) return;
                 if ("content-security-policy".equals(nameLower)) {
-                    // Strip frame-ancestors directive from CSP
-                    values.forEach(v -> {
-                        String stripped = v.replaceAll("(?i)frame-ancestors[^;]*(;|$)", "").trim();
-                        if (!stripped.isEmpty()) response.addHeader(name, stripped);
-                    });
+                    // Drop CSP entirely: we need iframe embedding + inline script injection
                     return;
                 }
                 values.forEach(v -> response.addHeader(name, v));
             });
 
-            // Stream response body
+            // Stream response body; inject hide-UI script into HTML pages
             try (InputStream body = upstreamResponse.body()) {
-                body.transferTo(response.getOutputStream());
+                String ct = upstreamResponse.headers().firstValue("content-type").orElse("");
+                if (ct.startsWith("text/html")) {
+                    byte[] bytes = body.readAllBytes();
+                    String html = new String(bytes, StandardCharsets.UTF_8);
+                    html = injectHideScript(html);
+                    byte[] out = html.getBytes(StandardCharsets.UTF_8);
+                    response.setContentLength(out.length);
+                    response.getOutputStream().write(out);
+                } else {
+                    body.transferTo(response.getOutputStream());
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -125,5 +132,57 @@ public class ProxyHandler {
             log.error("Proxy error for user {} -> {}: {}", userId, targetUrl, e.toString(), e);
             response.sendError(HttpServletResponse.SC_BAD_GATEWAY, "Proxy error: " + e);
         }
+    }
+
+    /**
+     * Injects a script into openclaw's HTML to hide the topbar and nav sidebar.
+     * Runs before Lit initialises so classes are locked from the start.
+     */
+    private static String injectHideScript(String html) {
+        // NOTE: openclaw-app renders into LIGHT DOM (no shadow root).
+        // CSS and shell element are in the regular document, not shadow DOM.
+        String script = """
+            <script data-portal-hide="1">
+            (function(){
+              var FORCE = ['shell--onboarding','shell--chat-focus'];
+              var CSS = '.topbar{display:none!important}.nav{display:none!important;width:0!important;overflow:hidden!important}.shell{grid-template-rows:0 1fr!important;grid-template-columns:0 1fr!important}';
+
+              // Inject CSS into document head (light DOM, not shadow DOM)
+              if(!document.querySelector('[data-ph]')){
+                var s = document.createElement('style');
+                s.setAttribute('data-ph','1');
+                s.textContent = CSS;
+                document.head.appendChild(s);
+              }
+
+              function lockShell(shell){
+                if(shell._ph) return;
+                shell._ph = true;
+                FORCE.forEach(function(c){ shell.classList.add(c); });
+                // Intercept setAttribute so Lit re-renders can't remove our classes
+                var orig = shell.setAttribute.bind(shell);
+                shell.setAttribute = function(name, value){
+                  if(name === 'class'){
+                    var set = new Set(value.trim().split(/\\s+/).filter(Boolean));
+                    FORCE.forEach(function(c){ set.add(c); });
+                    value = Array.from(set).join(' ');
+                  }
+                  orig(name, value);
+                };
+              }
+
+              // Shell is in LIGHT DOM - poll document directly (no shadow root needed)
+              var t = setInterval(function(){
+                var shell = document.querySelector('.shell');
+                if(shell){ lockShell(shell); clearInterval(t); }
+              }, 50);
+              setTimeout(function(){ clearInterval(t); }, 15000);
+            })();
+            </script>
+            """;
+        if (html.contains("</head>")) {
+            return html.replace("</head>", script + "</head>");
+        }
+        return script + html;
     }
 }
